@@ -19,10 +19,18 @@
     
   */
 
-// If you want a 12 hour clock with AM/PM, uncomment this
-// For the Hackaday 1K contest, this has to be left off,
-// and timezone support can't be added.
-// #define AMPM 1
+
+// Unfortunately, to stay within the 1K limit, we need to do away with the check
+// for GPS lock and just display whatever comes out of the module.
+#define HACKADAY_1K
+
+// For the Hackaday 1K contest, these options have to be left off.
+#ifndef HACKADAY_1K
+
+// Uncomment this to add timezone support.
+#define TIMEZONE 1
+
+#endif
 
 #include <stdlib.h>  
 #include <stdio.h>  
@@ -89,9 +97,33 @@
 
 #define RX_BUF_LEN (96)
 
+#ifdef TIMEZONE
+// DST is not in effect all day
+#define DST_NO 0
+// DST is in effect all day
+#define DST_YES 1
+// DST begins at 0200
+#define DST_BEGINS 2
+// DST ends 0300 - that is, at 0200 pre-correction.
+#define DST_ENDS 3
+
+// EEPROM locations to store the configuration.
+#define EE_TIMEZONE ((uint8_t*)0)
+#define EE_DST_ENABLE ((uint8_t*)1)
+#define EE_AM_PM ((uint8_t*)2)
+
+#endif
+
 volatile unsigned char disp_buf[8];
 volatile unsigned char rx_buf[RX_BUF_LEN];
 volatile unsigned char rx_str_len;
+volatile unsigned char gps_locked;
+
+#ifdef TIMEZONE
+volatile char tz_hour;
+volatile char dst_enabled;
+volatile char ampm;
+#endif
 
 // Delay, but pet the watchdog while doing it.
 static void Delay(unsigned long ms) {
@@ -107,8 +139,8 @@ static void Delay(unsigned long ms) {
 static void write_reg(unsigned char addr, unsigned char val) {
 	unsigned int data = (addr << 8) | val;
 
-	// Start with clk high
-	PORT_MAX |= BIT_MAX_CLK;
+	// Start with clk low
+	PORT_MAX &= ~BIT_MAX_CLK;
 	// Now drop !CS
 	PORT_MAX &= ~BIT_MAX_CS;
 	// now clock each data bit in
@@ -118,23 +150,85 @@ static void write_reg(unsigned char addr, unsigned char val) {
 			PORT_MAX |= BIT_MAX_DO;
 		else
 			PORT_MAX &= ~BIT_MAX_DO;
-		// Toggle the clock
-		PORT_MAX &= ~BIT_MAX_CS;
+		// Toggle the clock. The maximum clock frequency is something
+		// like 50 MHz, so there's no need to add any delays.
 		PORT_MAX |= BIT_MAX_CS;
+		PORT_MAX &= ~BIT_MAX_CS;
 	}
 	// And finally, raise !CS.
 	PORT_MAX |= BIT_MAX_CS;
 }
 
-ISR(INT0_vect) {
-	write_reg(MAX_REG_DEC_MODE, 0x3f); // full decode for 6 digits.
-	// Copy the display buffer data into the display
-	for(int i = 0; i < sizeof(disp_buf); i++) {
-		write_reg(MAX_REG_MASK_BOTH | i, disp_buf[i]);
-	}
+#ifdef TIMEZONE
+// zero-based day of year number for first day of each month, non-leap-year
+const unsigned int first_day[] PROGMEM = {0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334 };
+
+// Note that this routine is only defined for years between 2000 and 2099.
+// If you're alive beyond that, then you get to fix it.
+static unsigned char first_sunday(unsigned char m, unsigned char y) {
+        unsigned int day_of_year = 0;
+        // after March, leap year comes into play
+        if (m > 2) {
+                if ((y % 4) == 0) day_of_year++;
+        }
+        day_of_year += pgm_read_dword(&(first_day[m - 1]));
+        // This requires some explanation. We need to calculate the weekday of January 1st.
+	// This all works because Y2K was *not* a leap year and because we're doing all
+	// of this for years *after* 2000.
+	//
+        // January 1st 2000 was a Saturday. Since we're 0 based and starting with Sunday...
+        unsigned char weekday = 6;
+        // For every year after 2000, add one day, since normal years advance the weekday by 1.
+        weekday += y % 7;
+        weekday %= 7;
+        // For every leap year after 2000, add another day, since leap years advance the weekday by 2.
+        weekday += (y / 4) % 7;
+        weekday %= 7;
+        // Add in the day of the year
+        weekday += day_of_year % 7;
+        weekday %= 7;
+        // Now figure out how many days before we hit a Sunday. But if we're already there, then just return 1.
+        return (weekday == 0)?1:(8 - weekday);
+
 }
 
-static void handle_time(unsigned char h, unsigned char m, unsigned char s) {
+static unsigned char calculateDST(unsigned char d, unsigned char m, unsigned char y) {
+	// DST is in effect between the 2nd Sunday in March and the first Sunday in November
+	// The return values here are that DST is in effect, or it isn't, or it's beginning
+	// for the year today or it's ending today.
+	unsigned char change_day;
+	switch(m) {
+		case 1: // December through February
+		case 2:
+		case 12:
+			return DST_NO;
+		case 3: // March
+			change_day = first_sunday(m, y) + 7; // second Sunday.
+			if (d < change_day) return DST_NO;
+			else if (d == change_day) return DST_BEGINS;
+			else return DST_YES;
+			break;
+		case 4: // April through October
+		case 5:
+		case 6:
+		case 7:
+		case 8:
+		case 9:
+		case 10:
+			return DST_YES;
+		case 11: // November
+			change_day = first_sunday(m, y);
+			if (d < change_day) return DST_YES;
+			else if (d == change_day) return DST_ENDS;
+			else return DST_NO;
+			break;
+		default: // This is impossible, since m can only be between 1 and 12.
+			return 255;
+	}
+}
+#endif
+
+static void handle_time(unsigned char h, unsigned char m, unsigned char s, unsigned char dst_flags) {
 	// What we get is the current second. We have to increment it
 	// to represent the *next* second.
 	s++;
@@ -144,14 +238,29 @@ static void handle_time(unsigned char h, unsigned char m, unsigned char s) {
 	if (m >= 60) { m = 0; h++; }
 	if (m >= 23) { h = 0; }
 
-	// XXX Correct for time-zone here
+#ifdef TIMEZONE
+	unsigned char dst_offset = 0;
+	if (dst_enabled) {
+		switch(dst_flags) {
+			case DST_NO: dst_offset = 0; break; // do nothing
+			case DST_YES: dst_offset = 1; break; // add one hour
+			case DST_BEGINS:
+				dst_offset = (h >= 2)?1:0; break; // offset becomes 1 at 0200
+			case DST_ENDS:
+				dst_offset = (h >= 1)?0:1; break; // offset becomes 0 at 0200 (post-correction)
+		}
+	}
+	h += tz_hour + dst_offset;
+	while (h >= 24) h -= 24;
+	while (h < 0) h += 24;
 
-#ifdef AMPM
-	// Create AM or PM
 	unsigned char am = 0;
-	if (h < 12) { am = 1; }
-	else {
-		if (h > 12) h -= 12;
+	if (ampm) {
+		// Create AM or PM
+		if (h < 12) { am = 1; }
+		else {
+			if (h > 12) h -= 12;
+		}
 	}
 #endif
 
@@ -161,9 +270,11 @@ static void handle_time(unsigned char h, unsigned char m, unsigned char s) {
 	disp_buf[3] = m / 10;
 	disp_buf[4] = (h % 10) | MASK_DP;
 	disp_buf[5] = h / 10;
-#ifdef AMPM
-	disp_buf[6] = am ? MASK_DP:0;
-	disp_buf[7] = (!am) ? MASK_DP:0;
+#ifdef TIMEZONE
+	if (ampm) {
+		disp_buf[6] = am ? MASK_DP:0;
+		disp_buf[7] = (!am) ? MASK_DP:0;
+	}
 #endif
 }
 
@@ -211,9 +322,25 @@ static void handleGPS() {
 		ptr = skip_commas(ptr, 1);
 		if (ptr == NULL) return; // not enough commas
 		unsigned char h = (ptr[0] - '0') * 10 + (ptr[1] - '0');
-		unsigned char m = (ptr[2] - '0') * 10 + (ptr[3] - '0');
+		unsigned char min = (ptr[2] - '0') * 10 + (ptr[3] - '0');
 		unsigned char s = (ptr[4] - '0') * 10 + (ptr[5] - '0');
-		handle_time(h, m, s);
+		unsigned char dst_flags = 0;
+#ifdef TIMEZONE
+		ptr = skip_commas(ptr, 8);
+		if (ptr == NULL) return; // not enough commas
+		unsigned char d = (ptr[0] - '0') * 10 + (ptr[1] - '0');
+		unsigned char mon = (ptr[2] - '0') * 10 + (ptr[3] - '0');
+		unsigned char y = (ptr[4] - '0') * 10 + (ptr[5] - '0');
+		dst_flags = calculateDST(d, mon, y);
+#endif
+		handle_time(h, min, s, dst_flags);
+#ifndef HACKADAY_1K
+	} else if (!strncmp_P((const char*)rx_buf, PSTR("$GPGSA"), 6)) {
+		// $GPGSA,A,3,02,06,12,24,25,29,,,,,,,1.61,1.33,0.90*01
+		ptr = skip_commas(ptr, 2);
+		if (ptr == NULL) return; // not enough commas
+		gps_locked = (*ptr == '3');
+#endif
 	}
 }
 
@@ -235,15 +362,41 @@ ISR(USART0_RX_vect) {
 }
 
 static void write_no_sig() {
-	write_reg(MAX_REG_DEC_MODE, 0xff); // No decode, all digits
+	// Clear out the digit data
+	write_reg(MAX_REG_CONFIG, MAX_REG_CONFIG_R);
+#ifndef HACKADAY_1K
+	write_reg(MAX_REG_DEC_MODE, 0); // No decode, all digits
         write_reg(MAX_REG_MASK_BOTH | 5, MASK_E | MASK_G | MASK_C); // n
         write_reg(MAX_REG_MASK_BOTH | 4, MASK_E | MASK_G | MASK_C | MASK_D); // o
         write_reg(MAX_REG_MASK_BOTH | 2, MASK_A | MASK_F | MASK_G | MASK_C | MASK_D); // S
         write_reg(MAX_REG_MASK_BOTH | 1, MASK_B | MASK_C); // I
         write_reg(MAX_REG_MASK_BOTH | 0, MASK_A | MASK_F | MASK_E | MASK_G | MASK_C | MASK_D); // G
+#endif
+}
+
+ISR(INT0_vect) {
+#ifndef HACKADAY_1K
+	if (!gps_locked) {
+		write_no_sig();
+		return;
+	}
+#endif
+	write_reg(MAX_REG_DEC_MODE, 0x3f); // full decode for 6 digits.
+	// Copy the display buffer data into the display
+	for(int i = 0; i < sizeof(disp_buf); i++) {
+		write_reg(MAX_REG_MASK_BOTH | i, disp_buf[i]);
+	}
 }
 
 void main() {
+
+	wdt_enable(WDTO_1S);
+
+	// Make sure the CS pin is high and everything else is low.
+	PORT_MAX = BIT_MAX_CS;
+	DDRA = DDR_BITS_A;
+	DDRB = DDR_BITS_B;
+	PUEB = PULLUP_BITS_B;
 
 	// We don't use a lot of the chip, it turns out
 	PRR = ~_BV(PRUSART0);
@@ -265,6 +418,17 @@ void main() {
 	GIMSK = _BV(INT0); // enable INT0
 
 	rx_str_len = 0;
+	gps_locked = 0;
+
+#ifdef TIMEZONE
+	unsigned char ee_rd = eeprom_read_byte(EE_TIMEZONE);
+	if (ee_rd == 0xff)
+		tz_hour = -8;
+	else
+		tz_hour = ee_rd - 12;
+	dst_enabled = eeprom_read_byte(EE_DST_ENABLE);
+	ampm = eeprom_read_byte(EE_AM_PM);
+#endif
 
 	// Turn off the shut-down register, clear the digit data
 	write_reg(MAX_REG_CONFIG, MAX_REG_CONFIG_R | MAX_REG_CONFIG_S);
@@ -276,7 +440,10 @@ void main() {
 	write_reg(MAX_REG_TEST, 0);
 	write_no_sig();
 
+	// Turn on interrupts
 	sei();
-	// Do nothing. We're entirely interrupt driven.
-	while(1);
+
+	// Do nothing. We're entirely interrupt driven. For now.
+	// XXX todo - check for button pushes and do the timezone / DST menu tree.
+	while(1) wdt_reset();
 }
