@@ -44,8 +44,8 @@
 #include <avr/pgmspace.h>
 #include <util/atomic.h>
 
-// 10 MHz.
-#define F_CPU (10000000UL)
+// 8 MHz.
+#define F_CPU (8000000UL)
 #include <util/delay.h>
 
 // UBRR?_VALUE macros defined here are used below in serial initialization in main()
@@ -239,8 +239,13 @@ static void handle_time(unsigned char h, unsigned char m, unsigned char s, unsig
 	if (m >= 23) { h = 0; }
 
 #ifdef TIMEZONE
-	unsigned char dst_offset = 0;
+	// Move to local standard time.
+	h += tz_hour;
+	while (h >= 24) h -= 24;
+	while (h < 0) h += 24;
+
 	if (dst_enabled) {
+		unsigned char dst_offset = 0;
 		switch(dst_flags) {
 			case DST_NO: dst_offset = 0; break; // do nothing
 			case DST_YES: dst_offset = 1; break; // add one hour
@@ -249,10 +254,9 @@ static void handle_time(unsigned char h, unsigned char m, unsigned char s, unsig
 			case DST_ENDS:
 				dst_offset = (h >= 1)?0:1; break; // offset becomes 0 at 0200 (post-correction)
 		}
+		h += dst_offset;
+		while (h >= 24) h -= 24;
 	}
-	h += tz_hour + dst_offset;
-	while (h >= 24) h -= 24;
-	while (h < 0) h += 24;
 
 	unsigned char am = 0;
 	if (ampm) {
