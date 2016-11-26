@@ -331,6 +331,13 @@ static void handleGPS() {
 		unsigned char d = (ptr[0] - '0') * 10 + (ptr[1] - '0');
 		unsigned char mon = (ptr[2] - '0') * 10 + (ptr[3] - '0');
 		unsigned char y = (ptr[4] - '0') * 10 + (ptr[5] - '0');
+		// The problem is that our D/M/Y is UTC, but DST decisions are made in the local
+		// timezone. We can adjust the day against standard time midnight, and
+		// that will be good enough. Don't worry that this can result in d being either 0
+		// or past the last day of the month. Neither of those will match the "decision day"
+		// for DST, which is the only day on which the day of the month is significant.
+		if (h + tz_hour < 0) d--;
+		if (h + tz_hour > 23) d++;
 		dst_flags = calculateDST(d, mon, y);
 #endif
 		handle_time(h, min, s, dst_flags);
