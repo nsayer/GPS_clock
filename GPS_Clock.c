@@ -264,12 +264,12 @@ static void handle_time(unsigned char h, unsigned char m, unsigned char s, unsig
 	}
 #endif
 
-	disp_buf[0] = s % 10;
-	disp_buf[1] = s / 10;
-	disp_buf[2] = (m % 10) | MASK_DP;
-	disp_buf[3] = m / 10;
-	disp_buf[4] = (h % 10) | MASK_DP;
-	disp_buf[5] = h / 10;
+	disp_buf[5] = s % 10;
+	disp_buf[4] = s / 10;
+	disp_buf[3] = (m % 10) | MASK_DP;
+	disp_buf[2] = m / 10;
+	disp_buf[1] = (h % 10) | MASK_DP;
+	disp_buf[0] = h / 10;
 #ifdef TIMEZONE
 	if (ampm) {
 		disp_buf[6] = am ? MASK_DP:0;
@@ -373,11 +373,11 @@ static void write_no_sig() {
 	write_reg(MAX_REG_CONFIG, MAX_REG_CONFIG_R);
 #ifndef HACKADAY_1K
 	write_reg(MAX_REG_DEC_MODE, 0); // No decode, all digits
-        write_reg(MAX_REG_MASK_BOTH | 5, MASK_E | MASK_G | MASK_C); // n
-        write_reg(MAX_REG_MASK_BOTH | 4, MASK_E | MASK_G | MASK_C | MASK_D); // o
-        write_reg(MAX_REG_MASK_BOTH | 2, MASK_A | MASK_F | MASK_G | MASK_C | MASK_D); // S
-        write_reg(MAX_REG_MASK_BOTH | 1, MASK_B | MASK_C); // I
-        write_reg(MAX_REG_MASK_BOTH | 0, MASK_A | MASK_F | MASK_E | MASK_G | MASK_C | MASK_D); // G
+        write_reg(MAX_REG_MASK_BOTH | 0, MASK_E | MASK_G | MASK_C); // n
+        write_reg(MAX_REG_MASK_BOTH | 1, MASK_E | MASK_G | MASK_C | MASK_D); // o
+        write_reg(MAX_REG_MASK_BOTH | 3, MASK_A | MASK_F | MASK_G | MASK_C | MASK_D); // S
+        write_reg(MAX_REG_MASK_BOTH | 4, MASK_B | MASK_C); // I
+        write_reg(MAX_REG_MASK_BOTH | 5, MASK_A | MASK_F | MASK_E | MASK_G | MASK_C | MASK_D); // G
 #endif
 }
 
