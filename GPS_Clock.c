@@ -20,17 +20,9 @@
   */
 
 
-// Unfortunately, to stay within the 1K limit, we need to do away with the check
-// for GPS lock and just display whatever comes out of the module.
-#define HACKADAY_1K
-
-// For the Hackaday 1K contest, these options have to be left off.
-#ifndef HACKADAY_1K
-
-// Uncomment this to add timezone support.
-#define TIMEZONE 1
-
-#endif
+// Unfortunately, to stay within the 1K limit, we need to do away with
+// a *lot* of features.
+//#define HACKADAY_1K
 
 #include <stdlib.h>  
 #include <stdio.h>  
@@ -52,18 +44,26 @@
 #define BAUD 9600
 #include <util/setbaud.h>
 
+// Port A is used for the display SPI interface and serial.
+// We don't need to config the serial pins - it's enough to
+// just turn on the USART.
 #define PORT_MAX PORTA
 #define BIT_MAX_CS _BV(PORTA3)
 #define BIT_MAX_CLK _BV(PORTA4)
 #define BIT_MAX_DO _BV(PORTA6)
 #define DDR_BITS_A _BV(DDRA3) | _BV(DDRA4) | _BV(DDRA6)
 
+// Port B is the switches and the PPS GPS input
 #define PORT_SW PINB
 #define DDR_BITS_B (0)
 #define SW_0_BIT _BV(PINB0)
 #define SW_1_BIT _BV(PINB2)
+// Note that some versions of the AVR LIBC forgot to
+// define the individual PUExn bit numbers. If you have
+// a version like this, then just use _BV(0) | _BV(2).
 #define PULLUP_BITS_B _BV(PUEB0) | _BV(PUEB2)
 
+// The MAX6951 registers and their bits
 #define MAX_REG_DEC_MODE 0x01
 #define MAX_REG_INTENSITY 0x02
 #define MAX_REG_SCAN_LIMIT 0x03
@@ -76,8 +76,10 @@
 #define MAX_REG_TEST 0x05
 // P0 and P1 are planes - used when blinking is turned on
 // or the mask with the digit number 0-7. On the hardware, 0-5
-// are the digits from right to left (D0 is single seconds, D5
+// are the digits from left to right (D5 is single seconds, D0
 // is tens of hours). The D6 and D7 decimal points are AM and PM.
+// To blink, you write different stuff to P1 and P0 and turn on
+// blinking in the config register (bit E to turn on, bit B for speed).
 #define MAX_REG_MASK_P0 0x20
 #define MAX_REG_MASK_P1 0x40
 #define MAX_REG_MASK_BOTH (MAX_REG_MASK_P0 | MAX_REG_MASK_P1)
@@ -97,7 +99,8 @@
 
 #define RX_BUF_LEN (96)
 
-#ifdef TIMEZONE
+#ifndef HACKADAY_1K
+// These are return values from the DST detector routine.
 // DST is not in effect all day
 #define DST_NO 0
 // DST is in effect all day
@@ -111,7 +114,7 @@
 #define EE_TIMEZONE ((uint8_t*)0)
 #define EE_DST_ENABLE ((uint8_t*)1)
 #define EE_AM_PM ((uint8_t*)2)
-
+#define EE_BRIGHTNESS ((uint8_t*)3)
 #endif
 
 volatile unsigned char disp_buf[8];
@@ -119,7 +122,7 @@ volatile unsigned char rx_buf[RX_BUF_LEN];
 volatile unsigned char rx_str_len;
 volatile unsigned char gps_locked;
 
-#ifdef TIMEZONE
+#ifndef HACKADAY_1K
 volatile char tz_hour;
 volatile char dst_enabled;
 volatile char ampm;
@@ -136,12 +139,13 @@ static void Delay(unsigned long ms) {
   wdt_reset();
 }
 
-static void write_reg(unsigned char addr, unsigned char val) {
+static void write_reg(const unsigned char addr, const unsigned char val) {
+	// We write a 16 bit word, with address at the top end.
 	unsigned int data = (addr << 8) | val;
 
 	// Start with clk low
 	PORT_MAX &= ~BIT_MAX_CLK;
-	// Now drop !CS
+	// Now assert !CS
 	PORT_MAX &= ~BIT_MAX_CS;
 	// now clock each data bit in
 	for(int i = 15; i >= 0; i--) {
@@ -155,41 +159,49 @@ static void write_reg(unsigned char addr, unsigned char val) {
 		PORT_MAX |= BIT_MAX_CS;
 		PORT_MAX &= ~BIT_MAX_CS;
 	}
-	// And finally, raise !CS.
+	// And finally, release !CS.
 	PORT_MAX |= BIT_MAX_CS;
 }
 
-#ifdef TIMEZONE
+#ifndef HACKADAY_1K
 // zero-based day of year number for first day of each month, non-leap-year
 const unsigned int first_day[] PROGMEM = {0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334 };
 
 // Note that this routine is only defined for years between 2000 and 2099.
-// If you're alive beyond that, then you get to fix it.
+// If you're alive beyond that, then this is a Y2.1K bug for you to fix.
+// You also get to figure out what to do about the NMEA two-digit
+// year format. And probably update the GPS firmware or buy a new module.
 static unsigned char first_sunday(unsigned char m, unsigned char y) {
-        unsigned int day_of_year = 0;
-        // after March, leap year comes into play
-        if (m > 2) {
-                if ((y % 4) == 0) day_of_year++;
-        }
-        day_of_year += pgm_read_dword(&(first_day[m - 1]));
-        // This requires some explanation. We need to calculate the weekday of January 1st.
-	// This all works because Y2K was *not* a leap year and because we're doing all
+	unsigned int day_of_year = 0;
+	// after March, leap year comes into play
+	if (m > 2) {
+		// Y2.1K bug here. Every 100 years is not a leap year,
+		// but every 400 years is again.
+		if ((y % 4) == 0) day_of_year++;
+	}
+	// Now add in the offset for the month.
+	day_of_year += pgm_read_dword(&(first_day[m - 1]));
+	// This requires some explanation. We need to calculate the weekday of January 1st.
+	// This all works because Y2K was a leap year and because we're doing all
 	// of this for years *after* 2000.
 	//
-        // January 1st 2000 was a Saturday. Since we're 0 based and starting with Sunday...
-        unsigned char weekday = 6;
-        // For every year after 2000, add one day, since normal years advance the weekday by 1.
-        weekday += y % 7;
-        weekday %= 7;
-        // For every leap year after 2000, add another day, since leap years advance the weekday by 2.
-        weekday += (y / 4) % 7;
-        weekday %= 7;
-        // Add in the day of the year
-        weekday += day_of_year % 7;
-        weekday %= 7;
-        // Now figure out how many days before we hit a Sunday. But if we're already there, then just return 1.
-        return (weekday == 0)?1:(8 - weekday);
-
+	// January 1st 2000 was a Saturday. Since we're 0 based and starting with Sunday...
+	unsigned char weekday = 6;
+	// For every year after 2000, add one day, since normal years advance the weekday by 1.
+	weekday += y % 7;
+	weekday %= 7;
+	// For every leap year after 2000, add another day, since leap years advance the weekday by 2.
+	// But you only do it for leap years *in the past*. Note that this won't work for 2000 because
+	// of underflow.
+	weekday += (((y - 1) / 4) + 1) % 7;
+	weekday %= 7;
+	// Y2.1K bug - this is where you're supposed to take a day *away*
+	// every 100 years... but then add it *back* every 400.
+	// Add in the day of the year
+	weekday += day_of_year % 7;
+	weekday %= 7;
+	// Now figure out how many days before we hit a Sunday. But if we're already there, then just return 1.
+	return (weekday == 0)?1:(8 - weekday);
 }
 
 static unsigned char calculateDST(unsigned char d, unsigned char m, unsigned char y) {
@@ -238,7 +250,7 @@ static void handle_time(unsigned char h, unsigned char m, unsigned char s, unsig
 	if (m >= 60) { m = 0; h++; }
 	if (m >= 23) { h = 0; }
 
-#ifdef TIMEZONE
+#ifndef HACKADAY_1K
 	// Move to local standard time.
 	h += tz_hour;
 	while (h >= 24) h -= 24;
@@ -274,7 +286,7 @@ static void handle_time(unsigned char h, unsigned char m, unsigned char s, unsig
 	disp_buf[2] = m / 10;
 	disp_buf[1] = (h % 10) | MASK_DP;
 	disp_buf[0] = h / 10;
-#ifdef TIMEZONE
+#ifndef HACKADAY_1K
 	if (ampm) {
 		disp_buf[6] = am ? MASK_DP:0;
 		disp_buf[7] = (!am) ? MASK_DP:0;
@@ -329,7 +341,7 @@ static void handleGPS() {
 		unsigned char min = (ptr[2] - '0') * 10 + (ptr[3] - '0');
 		unsigned char s = (ptr[4] - '0') * 10 + (ptr[5] - '0');
 		unsigned char dst_flags = 0;
-#ifdef TIMEZONE
+#ifndef HACKADAY_1K
 		ptr = skip_commas(ptr, 8);
 		if (ptr == NULL) return; // not enough commas
 		unsigned char d = (ptr[0] - '0') * 10 + (ptr[1] - '0');
@@ -374,7 +386,7 @@ ISR(USART0_RX_vect) {
 
 static void write_no_sig() {
 	// Clear out the digit data
-	write_reg(MAX_REG_CONFIG, MAX_REG_CONFIG_R);
+	write_reg(MAX_REG_CONFIG, MAX_REG_CONFIG_R | MAX_REG_CONFIG_S);
 #ifndef HACKADAY_1K
 	write_reg(MAX_REG_DEC_MODE, 0); // No decode, all digits
         write_reg(MAX_REG_MASK_BOTH | 0, MASK_E | MASK_G | MASK_C); // n
@@ -431,7 +443,7 @@ void main() {
 	rx_str_len = 0;
 	gps_locked = 0;
 
-#ifdef TIMEZONE
+#ifndef HACKADAY_1K
 	unsigned char ee_rd = eeprom_read_byte(EE_TIMEZONE);
 	if (ee_rd == 0xff)
 		tz_hour = -8;
@@ -444,7 +456,14 @@ void main() {
 	// Turn off the shut-down register, clear the digit data
 	write_reg(MAX_REG_CONFIG, MAX_REG_CONFIG_R | MAX_REG_CONFIG_S);
 	write_reg(MAX_REG_SCAN_LIMIT, 7); // display all 8 digits
+#ifndef HACKADAY_1K
+	{
+		unsigned char brightness = eeprom_read_byte(EE_BRIGHTNESS) & 0xf;
+		write_reg(MAX_REG_INTENSITY, brightness);
+	}
+#else
 	write_reg(MAX_REG_INTENSITY, 0xf); // Full intensity
+#endif
 	// Turn on the self-test for a second
 	write_reg(MAX_REG_TEST, 1);
 	Delay(1000);
@@ -455,6 +474,7 @@ void main() {
 	sei();
 
 	// Do nothing. We're entirely interrupt driven. For now.
-	// XXX todo - check for button pushes and do the timezone / DST menu tree.
+	// XXX todo - check for button pushes and do the
+	// timezone / DST / AM-PM / brightness menu tree.
 	while(1) wdt_reset();
 }
