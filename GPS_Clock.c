@@ -401,8 +401,8 @@ ISR(USART0_RX_vect) {
 static void write_no_sig() {
 	// Clear out the digit data
 	write_reg(MAX_REG_CONFIG, MAX_REG_CONFIG_R | MAX_REG_CONFIG_S);
+	write_reg(MAX_REG_DEC_MODE, 0);
 #ifndef HACKADAY_1K
-	write_reg(MAX_REG_DEC_MODE, 0); // No decode, all digits
         write_reg(MAX_REG_MASK_BOTH | 0, MASK_E | MASK_G | MASK_C); // n
         write_reg(MAX_REG_MASK_BOTH | 1, MASK_E | MASK_G | MASK_C | MASK_D); // o
         write_reg(MAX_REG_MASK_BOTH | 3, MASK_A | MASK_F | MASK_G | MASK_C | MASK_D); // S
