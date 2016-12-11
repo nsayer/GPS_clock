@@ -115,6 +115,12 @@
 #define EE_DST_ENABLE ((uint8_t*)1)
 #define EE_AM_PM ((uint8_t*)2)
 #define EE_BRIGHTNESS ((uint8_t*)3)
+
+// timer 1 runs at F_CPU / 1024 Hz. We want something like 50 ms.
+#define DEBOUNCE_TICKS 390
+// The buttons
+#define SELECT 1
+#define SET 2
 #endif
 
 volatile unsigned char disp_buf[8];
@@ -126,6 +132,10 @@ volatile unsigned char gps_locked;
 volatile char tz_hour;
 volatile char dst_enabled;
 volatile char ampm;
+volatile char menu_pos;
+unsigned int debounce_time;
+unsigned char button_down;
+unsigned char brightness;
 #endif
 
 // Delay, but pet the watchdog while doing it.
@@ -401,6 +411,7 @@ static void write_no_sig() {
 
 ISR(INT0_vect) {
 #ifndef HACKADAY_1K
+	if (menu_pos) return;
 	if (!gps_locked) {
 		write_no_sig();
 		return;
@@ -413,12 +424,131 @@ ISR(INT0_vect) {
 	}
 }
 
+#ifndef HACKADAY_1K
+static unsigned char check_buttons() {
+	if (debounce_time != 0 && TCNT1 - debounce_time < DEBOUNCE_TICKS) {
+		return 0;
+	} else {
+		debounce_time = 0; // debounce is over
+	}
+	unsigned char status = PORT_SW & (SW_0_BIT | SW_1_BIT);
+	status ^= (SW_0_BIT | SW_1_BIT); // invert the buttons - 0 means down.
+	if (!((button_down == 0) ^ (status == 0))) return 0; // either no button is down, or a button is still down
+	if (!button_down && status) {
+		button_down = 1; // a button has been pushed
+		debounce_time = TCNT1;
+		if (!debounce_time) debounce_time++; // it's not allowed to be zero
+		return (status & SW_0_BIT)?SELECT:SET;
+	}
+	if (button_down && !status) {
+		button_down = 0; // a button is no longer down
+		debounce_time = TCNT1;
+		if (!debounce_time) debounce_time++; // it's not allowed to be zero
+		return 0;
+	}
+	return 0; // This should never actually happen
+}
+static void menu_render() {
+			// blank the display
+			write_reg(MAX_REG_CONFIG, MAX_REG_CONFIG_R | MAX_REG_CONFIG_S);
+	switch(menu_pos) {
+		case 0:
+			// we're returning to time mode. Either leave it blank or indicate no signal.
+			if (!gps_locked)
+				write_no_sig();
+			break;
+		case 1: // zone
+			write_reg(MAX_REG_DEC_MODE, 0x30); // decoding for last two digits only
+        		write_reg(MAX_REG_MASK_BOTH | 0, MASK_D | MASK_E | MASK_F | MASK_G); // t
+        		write_reg(MAX_REG_MASK_BOTH | 1, MASK_C | MASK_E | MASK_F | MASK_G); // h
+			if (tz_hour < 0) {
+        			write_reg(MAX_REG_MASK_BOTH | 3, MASK_G); // -
+			}
+        		write_reg(MAX_REG_MASK_BOTH | 4, abs(tz_hour) / 10);
+        		write_reg(MAX_REG_MASK_BOTH | 5, abs(tz_hour) % 10);
+			break;
+		case 2: // 12/24 hour
+			write_reg(MAX_REG_DEC_MODE, 0x6); // decoding for first two digits only (skipping one)
+        		write_reg(MAX_REG_MASK_BOTH | 1, ampm?1:2);
+        		write_reg(MAX_REG_MASK_BOTH | 2, ampm?2:4);
+        		write_reg(MAX_REG_MASK_BOTH | 4, MASK_C | MASK_E | MASK_F | MASK_G); // h
+        		write_reg(MAX_REG_MASK_BOTH | 5, MASK_E | MASK_G); // r
+			break;
+		case 3: // DST on/off
+			write_reg(MAX_REG_DEC_MODE, 0); // no decoding
+        		write_reg(MAX_REG_MASK_BOTH | 0, MASK_B | MASK_C | MASK_D | MASK_E | MASK_G); // d
+        		write_reg(MAX_REG_MASK_BOTH | 1, MASK_A | MASK_C | MASK_D | MASK_F | MASK_G); // S
+        		write_reg(MAX_REG_MASK_BOTH | 3, MASK_C | MASK_D | MASK_E | MASK_G); // o
+			if (dst_enabled) {
+        			write_reg(MAX_REG_MASK_BOTH | 4, MASK_C | MASK_E | MASK_G); // n
+			} else {
+        			write_reg(MAX_REG_MASK_BOTH | 4, MASK_A | MASK_E | MASK_F | MASK_G); // F
+        			write_reg(MAX_REG_MASK_BOTH | 5, MASK_A | MASK_E | MASK_F | MASK_G); // F
+			}
+			break;
+		case 4: // brightness
+			write_reg(MAX_REG_DEC_MODE, 0); // no decoding
+        		write_reg(MAX_REG_MASK_BOTH | 0, MASK_C | MASK_D | MASK_E | MASK_F | MASK_G); // b
+        		write_reg(MAX_REG_MASK_BOTH | 1, MASK_E | MASK_G); // r
+        		write_reg(MAX_REG_MASK_BOTH | 2, MASK_B | MASK_C); // I
+        		write_reg(MAX_REG_MASK_BOTH | 3, MASK_A | MASK_C | MASK_D | MASK_E | MASK_F | MASK_G); // G
+        		write_reg(MAX_REG_MASK_BOTH | 4, MASK_C | MASK_E | MASK_F | MASK_G); // h
+        		write_reg(MAX_REG_MASK_BOTH | 5, MASK_D | MASK_E | MASK_F | MASK_G); // t
+			write_reg(MAX_REG_INTENSITY, brightness);
+			break;
+	}
+}
+
+static void menu_select() {
+	switch(menu_pos) {
+		case 1:
+			eeprom_write_byte(EE_TIMEZONE, tz_hour + 12);
+			break;
+		case 2:
+			eeprom_write_byte(EE_AM_PM, ampm);
+			break;
+		case 3:
+			eeprom_write_byte(EE_DST_ENABLE, dst_enabled);
+			break;
+		case 4:
+			eeprom_write_byte(EE_BRIGHTNESS, brightness);
+			break;
+	}
+	if (++menu_pos > 4) menu_pos = 0;
+	menu_render();
+}
+
+static void menu_set() {
+	switch(menu_pos) {
+		case 0: return; // ignore SET when just running
+		case 1: // timezone
+			if (++tz_hour >= 13) tz_hour = -12;
+			break;
+		case 2: // 12/24 hour
+			ampm = !ampm;
+			break;
+		case 3: // DST on/off
+			dst_enabled = !dst_enabled;
+			break;
+		case 4: // brightness
+			if (++brightness > 15) brightness = 0;
+			break;
+	}
+	menu_render();
+}
+
+#endif
+
 void main() {
 
 	wdt_enable(WDTO_1S);
 
 	// We don't use a lot of the chip, it turns out
+#ifdef HACKADAY_1K
 	PRR = ~_BV(PRUSART0);
+#else
+	PRR = ~(_BV(PRUSART0) | _BV(PRTIM1));
+#endif
 
 	// Make sure the CS pin is high and everything else is low.
 	PORT_MAX = BIT_MAX_CS;
@@ -446,6 +576,8 @@ void main() {
 	gps_locked = 0;
 
 #ifndef HACKADAY_1K
+	TCCR1B = _BV(CS12) | _BV(CS10); // prescale by 1024
+
 	unsigned char ee_rd = eeprom_read_byte(EE_TIMEZONE);
 	if (ee_rd == 0xff)
 		tz_hour = -8;
@@ -453,6 +585,10 @@ void main() {
 		tz_hour = ee_rd - 12;
 	dst_enabled = eeprom_read_byte(EE_DST_ENABLE);
 	ampm = eeprom_read_byte(EE_AM_PM);
+
+	menu_pos = 0;
+	debounce_time = 0;
+	button_down = 0;
 #endif
 
 	// Turn off the shut-down register, clear the digit data
@@ -460,7 +596,7 @@ void main() {
 	write_reg(MAX_REG_SCAN_LIMIT, 7); // display all 8 digits
 #ifndef HACKADAY_1K
 	{
-		unsigned char brightness = eeprom_read_byte(EE_BRIGHTNESS) & 0xf;
+		brightness = eeprom_read_byte(EE_BRIGHTNESS) & 0xf;
 		write_reg(MAX_REG_INTENSITY, brightness);
 	}
 #else
@@ -475,8 +611,18 @@ void main() {
 	// Turn on interrupts
 	sei();
 
-	// Do nothing. We're entirely interrupt driven. For now.
-	// XXX todo - check for button pushes and do the
-	// timezone / DST / AM-PM / brightness menu tree.
-	while(1) wdt_reset();
+	while(1) {
+		wdt_reset();
+		unsigned char button = check_buttons();
+		if (!button) continue;
+
+		switch(button) {
+			case SELECT:
+				menu_select();
+				break;
+			case SET:
+				menu_set();
+				break;
+		}
+	}
 }
