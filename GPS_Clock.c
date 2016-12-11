@@ -156,8 +156,8 @@ static void write_reg(const unsigned char addr, const unsigned char val) {
 			PORT_MAX &= ~BIT_MAX_DO;
 		// Toggle the clock. The maximum clock frequency is something
 		// like 50 MHz, so there's no need to add any delays.
-		PORT_MAX |= BIT_MAX_CS;
-		PORT_MAX &= ~BIT_MAX_CS;
+		PORT_MAX |= BIT_MAX_CLK;
+		PORT_MAX &= ~BIT_MAX_CLK;
 	}
 	// And finally, release !CS.
 	PORT_MAX |= BIT_MAX_CS;
@@ -415,14 +415,14 @@ void main() {
 
 	wdt_enable(WDTO_1S);
 
+	// We don't use a lot of the chip, it turns out
+	PRR = ~_BV(PRUSART0);
+
 	// Make sure the CS pin is high and everything else is low.
 	PORT_MAX = BIT_MAX_CS;
 	DDRA = DDR_BITS_A;
 	DDRB = DDR_BITS_B;
 	PUEB = PULLUP_BITS_B;
-
-	// We don't use a lot of the chip, it turns out
-	PRR = ~_BV(PRUSART0);
 
 	UBRR0H = UBRRH_VALUE;
 	UBRR0L = UBRRL_VALUE;
