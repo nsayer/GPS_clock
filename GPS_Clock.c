@@ -615,6 +615,7 @@ void main() {
 
 	while(1) {
 		wdt_reset();
+#ifndef HACKADAY_1K
 		unsigned char button = check_buttons();
 		if (!button) continue;
 
@@ -626,5 +627,6 @@ void main() {
 				menu_set();
 				break;
 		}
+#endif
 	}
 }
