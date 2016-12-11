@@ -302,6 +302,8 @@ static void handle_time(unsigned char h, unsigned char m, unsigned char s, unsig
 	if (ampm) {
 		disp_buf[7] = am ? MASK_DP:0;
 		disp_buf[6] = (!am) ? MASK_DP:0;
+	} else {
+		disp_buf[6] = disp_buf[7] = 0;
 	}
 #endif
 }
