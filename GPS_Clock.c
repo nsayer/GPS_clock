@@ -73,11 +73,11 @@
 #define MAX_REG_CONFIG_E _BV(3)
 #define MAX_REG_CONFIG_B _BV(2)
 #define MAX_REG_CONFIG_S _BV(0)
-#define MAX_REG_TEST 0x05
+#define MAX_REG_TEST 0x07
 // P0 and P1 are planes - used when blinking is turned on
 // or the mask with the digit number 0-7. On the hardware, 0-5
 // are the digits from left to right (D5 is single seconds, D0
-// is tens of hours). The D6 and D7 decimal points are AM and PM.
+// is tens of hours). The D7 and D6 decimal points are AM and PM (respectively).
 // To blink, you write different stuff to P1 and P0 and turn on
 // blinking in the config register (bit E to turn on, bit B for speed).
 #define MAX_REG_MASK_P0 0x20
@@ -248,13 +248,11 @@ static void handle_time(unsigned char h, unsigned char m, unsigned char s, unsig
 	// twice.
 	if (s >= 60) { s = 0; m++; }
 	if (m >= 60) { m = 0; h++; }
-	if (m >= 23) { h = 0; }
+	if (h >= 24) { h = 0; }
 
 #ifndef HACKADAY_1K
 	// Move to local standard time.
-	h += tz_hour;
-	while (h >= 24) h -= 24;
-	while (h < 0) h += 24;
+	int hr_offset = tz_hour;
 
 	if (dst_enabled) {
 		unsigned char dst_offset = 0;
@@ -266,14 +264,18 @@ static void handle_time(unsigned char h, unsigned char m, unsigned char s, unsig
 			case DST_ENDS:
 				dst_offset = (h >= 1)?0:1; break; // offset becomes 0 at 0200 (post-correction)
 		}
-		h += dst_offset;
-		while (h >= 24) h -= 24;
+		hr_offset += dst_offset;
 	}
+
+	h += tz_hour;
+	while (h >= 24) h -= 24;
+	while (h < 0) h += 24;
 
 	unsigned char am = 0;
 	if (ampm) {
 		// Create AM or PM
-		if (h < 12) { am = 1; }
+                if (h == 0) { h = 12; am = 1; }
+		else if (h < 12) { am = 1; }
 		else {
 			if (h > 12) h -= 12;
 		}
@@ -288,8 +290,8 @@ static void handle_time(unsigned char h, unsigned char m, unsigned char s, unsig
 	disp_buf[0] = h / 10;
 #ifndef HACKADAY_1K
 	if (ampm) {
-		disp_buf[6] = am ? MASK_DP:0;
-		disp_buf[7] = (!am) ? MASK_DP:0;
+		disp_buf[7] = am ? MASK_DP:0;
+		disp_buf[6] = (!am) ? MASK_DP:0;
 	}
 #endif
 }
