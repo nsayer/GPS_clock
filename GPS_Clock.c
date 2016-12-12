@@ -251,14 +251,15 @@ static unsigned char calculateDST(unsigned char d, unsigned char m, unsigned cha
 #endif
 
 static void handle_time(unsigned char h, unsigned char m, unsigned char s, unsigned char dst_flags) {
+	int hr = h;
 	// What we get is the current second. We have to increment it
 	// to represent the *next* second.
 	s++;
 	// Note that this also handles leap-seconds. We wind up pinning to 0
 	// twice.
 	if (s >= 60) { s = 0; m++; }
-	if (m >= 60) { m = 0; h++; }
-	if (h >= 24) { h = 0; }
+	if (m >= 60) { m = 0; hr++; }
+	if (hr >= 24) { hr = 0; }
 
 #ifndef HACKADAY_1K
 	// Move to local standard time.
@@ -270,24 +271,24 @@ static void handle_time(unsigned char h, unsigned char m, unsigned char s, unsig
 			case DST_NO: dst_offset = 0; break; // do nothing
 			case DST_YES: dst_offset = 1; break; // add one hour
 			case DST_BEGINS:
-				dst_offset = (h >= 2)?1:0; break; // offset becomes 1 at 0200
+				dst_offset = (hr >= 2)?1:0; break; // offset becomes 1 at 0200
 			case DST_ENDS:
-				dst_offset = (h >= 1)?0:1; break; // offset becomes 0 at 0200 (post-correction)
+				dst_offset = (hr >= 1)?0:1; break; // offset becomes 0 at 0200 (post-correction)
 		}
 		hr_offset += dst_offset;
 	}
 
-	h += tz_hour;
-	while (h >= 24) h -= 24;
-	while (h < 0) h += 24;
+	hr += tz_hour;
+	while (hr >= 24) hr -= 24;
+	while (hr < 0) hr += 24;
 
 	unsigned char am = 0;
 	if (ampm) {
 		// Create AM or PM
-                if (h == 0) { h = 12; am = 1; }
-		else if (h < 12) { am = 1; }
+                if (hr == 0) { hr = 12; am = 1; }
+		else if (hr < 12) { am = 1; }
 		else {
-			if (h > 12) h -= 12;
+			if (hr > 12) hr -= 12;
 		}
 	}
 #endif
@@ -296,8 +297,8 @@ static void handle_time(unsigned char h, unsigned char m, unsigned char s, unsig
 	disp_buf[4] = s / 10;
 	disp_buf[3] = (m % 10) | MASK_DP;
 	disp_buf[2] = m / 10;
-	disp_buf[1] = (h % 10) | MASK_DP;
-	disp_buf[0] = h / 10;
+	disp_buf[1] = (hr % 10) | MASK_DP;
+	disp_buf[0] = hr / 10;
 #ifndef HACKADAY_1K
 	if (ampm) {
 		disp_buf[7] = am ? MASK_DP:0;
