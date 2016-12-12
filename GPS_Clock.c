@@ -264,7 +264,9 @@ static void handle_time(char h, unsigned char m, unsigned char s, unsigned char 
 
 #ifndef HACKADAY_1K
 	// Move to local standard time.
-	int hr_offset = tz_hour;
+	h += tz_hour;
+	while (h >= 24) h -= 24;
+	while (h < 0) h += 24;
 
 	if (dst_enabled) {
 		unsigned char dst_offset = 0;
@@ -276,12 +278,9 @@ static void handle_time(char h, unsigned char m, unsigned char s, unsigned char 
 			case DST_ENDS:
 				dst_offset = (h >= 1)?0:1; break; // offset becomes 0 at 0200 (post-correction)
 		}
-		hr_offset += dst_offset;
+		h += dst_offset;
+		if (h >= 24) h -= 24;
 	}
-
-	h += tz_hour;
-	while (h >= 24) h -= 24;
-	while (h < 0) h += 24;
 
 	unsigned char am = 0;
 	if (ampm) {
