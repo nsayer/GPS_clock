@@ -53,15 +53,8 @@
 #define BIT_MAX_DO _BV(PORTA6)
 #define DDR_BITS_A _BV(DDRA3) | _BV(DDRA4) | _BV(DDRA6)
 
-// Port B is the switches and the PPS GPS input
-#define PORT_SW PINB
-#define DDR_BITS_B (0)
-#define SW_0_BIT _BV(PINB0)
-#define SW_1_BIT _BV(PINB2)
-// Note that some versions of the AVR LIBC forgot to
-// define the individual PUExn bit numbers. If you have
-// a version like this, then just use _BV(0) | _BV(2).
-#define PULLUP_BITS_B _BV(PUEB0) | _BV(PUEB2)
+#ifndef HACKADAY_1K
+#endif
 
 // The MAX6951 registers and their bits
 #define MAX_REG_DEC_MODE 0x01
@@ -100,6 +93,17 @@
 #define RX_BUF_LEN (96)
 
 #ifndef HACKADAY_1K
+
+// Port B is the switches and the PPS GPS input
+#define PORT_SW PINB
+#define DDR_BITS_B (0)
+#define SW_0_BIT _BV(PINB0)
+#define SW_1_BIT _BV(PINB2)
+// Note that some versions of the AVR LIBC forgot to
+// define the individual PUExn bit numbers. If you have
+// a version like this, then just use _BV(0) | _BV(2).
+#define PULLUP_BITS_B _BV(PUEB0) | _BV(PUEB2)
+
 // These are return values from the DST detector routine.
 // DST is not in effect all day
 #define DST_NO 0
@@ -121,6 +125,7 @@
 // The buttons
 #define SELECT 1
 #define SET 2
+
 #endif
 
 volatile unsigned char disp_buf[8];
@@ -149,7 +154,7 @@ static void Delay(unsigned long ms) {
   wdt_reset();
 }
 
-static void write_reg(const unsigned char addr, const unsigned char val) {
+void write_reg(const unsigned char addr, const unsigned char val) {
 	// We write a 16 bit word, with address at the top end.
 	unsigned int data = (addr << 8) | val;
 
@@ -250,16 +255,15 @@ static unsigned char calculateDST(unsigned char d, unsigned char m, unsigned cha
 }
 #endif
 
-static void handle_time(unsigned char h, unsigned char m, unsigned char s, unsigned char dst_flags) {
-	int hr = h;
+static void handle_time(char h, unsigned char m, unsigned char s, unsigned char dst_flags) {
 	// What we get is the current second. We have to increment it
 	// to represent the *next* second.
 	s++;
 	// Note that this also handles leap-seconds. We wind up pinning to 0
 	// twice.
 	if (s >= 60) { s = 0; m++; }
-	if (m >= 60) { m = 0; hr++; }
-	if (hr >= 24) { hr = 0; }
+	if (m >= 60) { m = 0; h++; }
+	if (h >= 24) { h = 0; }
 
 #ifndef HACKADAY_1K
 	// Move to local standard time.
@@ -271,24 +275,24 @@ static void handle_time(unsigned char h, unsigned char m, unsigned char s, unsig
 			case DST_NO: dst_offset = 0; break; // do nothing
 			case DST_YES: dst_offset = 1; break; // add one hour
 			case DST_BEGINS:
-				dst_offset = (hr >= 2)?1:0; break; // offset becomes 1 at 0200
+				dst_offset = (h >= 2)?1:0; break; // offset becomes 1 at 0200
 			case DST_ENDS:
-				dst_offset = (hr >= 1)?0:1; break; // offset becomes 0 at 0200 (post-correction)
+				dst_offset = (h >= 1)?0:1; break; // offset becomes 0 at 0200 (post-correction)
 		}
 		hr_offset += dst_offset;
 	}
 
-	hr += tz_hour;
-	while (hr >= 24) hr -= 24;
-	while (hr < 0) hr += 24;
+	h += tz_hour;
+	while (h >= 24) h -= 24;
+	while (h < 0) h += 24;
 
 	unsigned char am = 0;
 	if (ampm) {
 		// Create AM or PM
-                if (hr == 0) { hr = 12; am = 1; }
-		else if (hr < 12) { am = 1; }
+                if (h == 0) { h = 12; am = 1; }
+		else if (h < 12) { am = 1; }
 		else {
-			if (hr > 12) hr -= 12;
+			if (h > 12) h -= 12;
 		}
 	}
 #endif
@@ -297,8 +301,8 @@ static void handle_time(unsigned char h, unsigned char m, unsigned char s, unsig
 	disp_buf[4] = s / 10;
 	disp_buf[3] = (m % 10) | MASK_DP;
 	disp_buf[2] = m / 10;
-	disp_buf[1] = (hr % 10) | MASK_DP;
-	disp_buf[0] = hr / 10;
+	disp_buf[1] = (h % 10) | MASK_DP;
+	disp_buf[0] = h / 10;
 #ifndef HACKADAY_1K
 	if (ampm) {
 		disp_buf[7] = am ? MASK_DP:0;
@@ -352,7 +356,7 @@ static void handleGPS() {
 		// $GPRMC,172313.000,A,xxxx.xxxx,N,xxxxx.xxxx,W,0.01,180.80,260516,,,D*74\x0d\x0a
 		ptr = skip_commas(ptr, 1);
 		if (ptr == NULL) return; // not enough commas
-		unsigned char h = (ptr[0] - '0') * 10 + (ptr[1] - '0');
+		char h = (ptr[0] - '0') * 10 + (ptr[1] - '0');
 		unsigned char min = (ptr[2] - '0') * 10 + (ptr[3] - '0');
 		unsigned char s = (ptr[4] - '0') * 10 + (ptr[5] - '0');
 		unsigned char dst_flags = 0;
@@ -367,8 +371,8 @@ static void handleGPS() {
 		// that will be good enough. Don't worry that this can result in d being either 0
 		// or past the last day of the month. Neither of those will match the "decision day"
 		// for DST, which is the only day on which the day of the month is significant.
-		if (((int)h) + tz_hour < 0) d--;
-		if (((int)h) + tz_hour > 23) d++;
+		if (h + tz_hour < 0) d--;
+		if (h + tz_hour > 23) d++;
 		dst_flags = calculateDST(d, mon, y);
 #endif
 		handle_time(h, min, s, dst_flags);
@@ -399,18 +403,18 @@ ISR(USART0_RX_vect) {
   }
 }
 
+#ifndef HACKADAY_1K
 static void write_no_sig() {
 	// Clear out the digit data
 	write_reg(MAX_REG_CONFIG, MAX_REG_CONFIG_R | MAX_REG_CONFIG_S);
 	write_reg(MAX_REG_DEC_MODE, 0);
-#ifndef HACKADAY_1K
         write_reg(MAX_REG_MASK_BOTH | 0, MASK_E | MASK_G | MASK_C); // n
         write_reg(MAX_REG_MASK_BOTH | 1, MASK_E | MASK_G | MASK_C | MASK_D); // o
         write_reg(MAX_REG_MASK_BOTH | 3, MASK_A | MASK_F | MASK_G | MASK_C | MASK_D); // S
         write_reg(MAX_REG_MASK_BOTH | 4, MASK_B | MASK_C); // I
         write_reg(MAX_REG_MASK_BOTH | 5, MASK_A | MASK_F | MASK_E | MASK_G | MASK_C | MASK_D); // G
-#endif
 }
+#endif
 
 ISR(INT0_vect) {
 #ifndef HACKADAY_1K
@@ -451,6 +455,7 @@ static unsigned char check_buttons() {
 	}
 	return 0; // This should never actually happen
 }
+
 static void menu_render() {
 			// blank the display
 			write_reg(MAX_REG_CONFIG, MAX_REG_CONFIG_R | MAX_REG_CONFIG_S);
@@ -556,8 +561,11 @@ void main() {
 	// Make sure the CS pin is high and everything else is low.
 	PORT_MAX = BIT_MAX_CS;
 	DDRA = DDR_BITS_A;
+
+#ifndef HACKADAY_1K
 	DDRB = DDR_BITS_B;
 	PUEB = PULLUP_BITS_B;
+#endif
 
 	UBRR0H = UBRRH_VALUE;
 	UBRR0L = UBRRL_VALUE;
@@ -609,7 +617,9 @@ void main() {
 	write_reg(MAX_REG_TEST, 1);
 	Delay(1000);
 	write_reg(MAX_REG_TEST, 0);
+#ifndef HACKADAY_1K
 	write_no_sig();
+#endif
 
 	// Turn on interrupts
 	sei();
