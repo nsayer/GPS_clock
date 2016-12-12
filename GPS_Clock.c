@@ -163,16 +163,16 @@ void write_reg(const unsigned char addr, const unsigned char val) {
 	unsigned int data = (addr << 8) | val;
 
 	// ISRs can perform writes, so the whole thing has to be atomic.
-	// It's unlikely, but it would be messy.
+	// A collision is unlikely, but it would be messy.
 	ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
 		// Start with clk low
 		PORT_MAX &= ~BIT_MAX_CLK;
 		// Now assert !CS
 		PORT_MAX &= ~BIT_MAX_CS;
 		// now clock each data bit in
-		for(int i = 15; i >= 0; i--) {
+		for(unsigned int mask = 1 << 15; mask != 0; mask >>= 1) {
 			// Set the data bit to the appropriate data bit value
-			if ((data >> i) & 0x1)
+			if (data & mask)
 				PORT_MAX |= BIT_MAX_DO;
 			else
 				PORT_MAX &= ~BIT_MAX_DO;
@@ -507,8 +507,16 @@ ISR(INT0_vect) {
 		write_no_sig();
 		return;
 	}
-#endif
+	// If we have an AM or PM set and if the 10 hours digit is 0, then blank it instead.
+	// Its value will be zero, so simply disabling the hex decode will result in no segments.
+	if (((disp_buf[6] & 0x80) != 0 || (disp_buf[7] & 0x80) != 0) && disp_buf[0] == 0) {
+		write_reg(MAX_REG_DEC_MODE, 0x3e); // full decode for first 5 digits. 10 hours blanked.
+	} else {
+		write_reg(MAX_REG_DEC_MODE, 0x3f); // full decode for 6 digits.
+	}
+#else
 	write_reg(MAX_REG_DEC_MODE, 0x3f); // full decode for 6 digits.
+#endif
 	// Copy the display buffer data into the display
 	for(int i = 0; i < sizeof(disp_buf); i++) {
 		write_reg(MAX_REG_MASK_BOTH | i, disp_buf[i]);
