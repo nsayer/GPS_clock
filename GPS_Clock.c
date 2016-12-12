@@ -53,9 +53,6 @@
 #define BIT_MAX_DO _BV(PORTA6)
 #define DDR_BITS_A _BV(DDRA3) | _BV(DDRA4) | _BV(DDRA6)
 
-#ifndef HACKADAY_1K
-#endif
-
 // The MAX6951 registers and their bits
 #define MAX_REG_DEC_MODE 0x01
 #define MAX_REG_INTENSITY 0x02
@@ -131,9 +128,9 @@
 volatile unsigned char disp_buf[8];
 volatile unsigned char rx_buf[RX_BUF_LEN];
 volatile unsigned char rx_str_len;
-volatile unsigned char gps_locked;
 
 #ifndef HACKADAY_1K
+volatile unsigned char gps_locked;
 volatile char tz_hour;
 volatile char dst_enabled;
 volatile char ampm;
@@ -584,7 +581,6 @@ void main() {
 	GIMSK = _BV(INT0); // enable INT0
 
 	rx_str_len = 0;
-	gps_locked = 0;
 
 #ifndef HACKADAY_1K
 	TCCR1B = _BV(CS12) | _BV(CS10); // prescale by 1024
@@ -597,6 +593,7 @@ void main() {
 	dst_enabled = eeprom_read_byte(EE_DST_ENABLE);
 	ampm = eeprom_read_byte(EE_AM_PM);
 
+	gps_locked = 0;
 	menu_pos = 0;
 	debounce_time = 0;
 	button_down = 0;
