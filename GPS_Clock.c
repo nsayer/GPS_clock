@@ -111,9 +111,16 @@
 // DST ends 0300 - that is, at 0200 pre-correction.
 #define DST_ENDS 3
 
+// The possible values for dst_mode
+#define DST_OFF 0
+#define DST_US 1
+#define DST_EU 2
+#define DST_AU 3
+#define DST_MODE_MAX DST_AU
+
 // EEPROM locations to store the configuration.
 #define EE_TIMEZONE ((uint8_t*)0)
-#define EE_DST_ENABLE ((uint8_t*)1)
+#define EE_DST_MODE ((uint8_t*)1)
 #define EE_AM_PM ((uint8_t*)2)
 #define EE_BRIGHTNESS ((uint8_t*)3)
 
@@ -132,9 +139,9 @@ volatile unsigned char rx_str_len;
 #ifndef HACKADAY_1K
 volatile unsigned char gps_locked;
 volatile char tz_hour;
-volatile char dst_enabled;
-volatile char ampm;
-volatile char menu_pos;
+volatile unsigned char dst_mode;
+volatile unsigned char ampm;
+volatile unsigned char menu_pos;
 unsigned int debounce_time;
 unsigned char button_down;
 unsigned char brightness;
@@ -155,24 +162,28 @@ void write_reg(const unsigned char addr, const unsigned char val) {
 	// We write a 16 bit word, with address at the top end.
 	unsigned int data = (addr << 8) | val;
 
-	// Start with clk low
-	PORT_MAX &= ~BIT_MAX_CLK;
-	// Now assert !CS
-	PORT_MAX &= ~BIT_MAX_CS;
-	// now clock each data bit in
-	for(int i = 15; i >= 0; i--) {
-		// Set the data bit to the appropriate data bit value
-		if ((data >> i) & 0x1)
-			PORT_MAX |= BIT_MAX_DO;
-		else
-			PORT_MAX &= ~BIT_MAX_DO;
-		// Toggle the clock. The maximum clock frequency is something
-		// like 50 MHz, so there's no need to add any delays.
-		PORT_MAX |= BIT_MAX_CLK;
+	// ISRs can perform writes, so the whole thing has to be atomic.
+	// It's unlikely, but it would be messy.
+	ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
+		// Start with clk low
 		PORT_MAX &= ~BIT_MAX_CLK;
+		// Now assert !CS
+		PORT_MAX &= ~BIT_MAX_CS;
+		// now clock each data bit in
+		for(int i = 15; i >= 0; i--) {
+			// Set the data bit to the appropriate data bit value
+			if ((data >> i) & 0x1)
+				PORT_MAX |= BIT_MAX_DO;
+			else
+				PORT_MAX &= ~BIT_MAX_DO;
+			// Toggle the clock. The maximum clock frequency is something
+			// like 50 MHz, so there's no need to add any delays.
+			PORT_MAX |= BIT_MAX_CLK;
+			PORT_MAX &= ~BIT_MAX_CLK;
+		}
+		// And finally, release !CS.
+		PORT_MAX |= BIT_MAX_CS;
 	}
-	// And finally, release !CS.
-	PORT_MAX |= BIT_MAX_CS;
 }
 
 #ifndef HACKADAY_1K
@@ -215,8 +226,73 @@ static unsigned char first_sunday(unsigned char m, unsigned char y) {
 	// Now figure out how many days before we hit a Sunday. But if we're already there, then just return 1.
 	return (weekday == 0)?1:(8 - weekday);
 }
-
-static unsigned char calculateDST(unsigned char d, unsigned char m, unsigned char y) {
+static unsigned char calculateDSTAU(unsigned char d, unsigned char m, unsigned char y) {
+        // DST is in effect between the first Sunday in October and the first Sunday in April
+        unsigned char change_day;
+        switch(m) {
+                case 1: // November through March
+                case 2:
+                case 3:
+                case 11:
+                case 12:
+                        return DST_YES;
+                case 4: // April
+                        change_day = first_sunday(m, y);
+                        if (d < change_day) return DST_YES;
+                        else if (d == change_day) return DST_ENDS;
+                        else return DST_NO;
+                        break;
+                case 5: // April through September
+                case 6:
+                case 7:
+                case 8:
+                case 9:
+                        return DST_NO;
+                case 10: // October
+                        change_day = first_sunday(m, y);
+                        if (d < change_day) return DST_NO;
+                        else if (d == change_day) return DST_BEGINS;
+                        else return DST_YES;
+                        break;
+                default: // This is impossible, since m can only be between 1 and 12.
+                        return 255;
+        }
+}
+static unsigned char calculateDSTEU(unsigned char d, unsigned char m, unsigned char y) {
+        // DST is in effect between the last Sunday in March and the last Sunday in October
+        unsigned char change_day;
+        switch(m) {
+                case 1: // November through February
+                case 2:
+                case 11:
+                case 12:
+                        return DST_NO;
+                case 3: // March
+                        change_day = first_sunday(m, y);
+                        while(change_day + 7 < 30) change_day += 7; // last Sunday
+                        if (d < change_day) return DST_NO;
+                        else if (d == change_day) return DST_BEGINS;
+                        else return DST_YES;
+                        break;
+                case 4: // April through September
+                case 5:
+                case 6:
+                case 7:
+                case 8:
+                case 9:
+                        return DST_YES;
+                case 10: // October
+                        change_day = first_sunday(m, y);
+                        while(change_day + 7 < 30) change_day += 7; // last Sunday
+                        if (d < change_day) return DST_YES;
+                        else if (d == change_day) return DST_ENDS;
+                        else return DST_NO;
+                        break;
+                default: // This is impossible, since m can only be between 1 and 12.
+                        return 255;
+        }
+}
+static unsigned char calculateDSTUS(unsigned char d, unsigned char m, unsigned char y) {
 	// DST is in effect between the 2nd Sunday in March and the first Sunday in November
 	// The return values here are that DST is in effect, or it isn't, or it's beginning
 	// for the year today or it's ending today.
@@ -250,6 +326,18 @@ static unsigned char calculateDST(unsigned char d, unsigned char m, unsigned cha
 			return 255;
 	}
 }
+static unsigned char calculateDST(unsigned char d, unsigned char m, unsigned char y) {
+        switch(dst_mode) {
+                case DST_US:
+                        return calculateDSTUS(d, m, y);
+                case DST_EU:
+                        return calculateDSTEU(d, m, y);
+                case DST_AU:
+                        return calculateDSTAU(d, m, y);
+                default: // off - should never happen
+                        return DST_NO;
+        }
+}
 #endif
 
 static void handle_time(char h, unsigned char m, unsigned char s, unsigned char dst_flags) {
@@ -268,15 +356,15 @@ static void handle_time(char h, unsigned char m, unsigned char s, unsigned char 
 	while (h >= 24) h -= 24;
 	while (h < 0) h += 24;
 
-	if (dst_enabled) {
+	if (dst_mode != DST_OFF) {
 		unsigned char dst_offset = 0;
 		switch(dst_flags) {
 			case DST_NO: dst_offset = 0; break; // do nothing
 			case DST_YES: dst_offset = 1; break; // add one hour
 			case DST_BEGINS:
-				dst_offset = (h >= 2)?1:0; break; // offset becomes 1 at 0200
-			case DST_ENDS:
-				dst_offset = (h >= 1)?0:1; break; // offset becomes 0 at 0200 (post-correction)
+				dst_offset = (h >= (dst_mode == DST_EU?1:2))?1:0; break; // offset becomes 1 at 0200 (0100 EU)
+                        case DST_ENDS:
+                                dst_offset = (h >= (dst_mode == DST_EU?0:1))?0:1; break; // offset becomes 0 at 0200 (post-correction) (0100 EU)
 		}
 		h += dst_offset;
 		if (h >= 24) h -= 24;
@@ -482,13 +570,25 @@ static void menu_render() {
 			write_reg(MAX_REG_DEC_MODE, 0); // no decoding
         		write_reg(MAX_REG_MASK_BOTH | 0, MASK_B | MASK_C | MASK_D | MASK_E | MASK_G); // d
         		write_reg(MAX_REG_MASK_BOTH | 1, MASK_A | MASK_C | MASK_D | MASK_F | MASK_G); // S
-        		write_reg(MAX_REG_MASK_BOTH | 3, MASK_C | MASK_D | MASK_E | MASK_G); // o
-			if (dst_enabled) {
-        			write_reg(MAX_REG_MASK_BOTH | 4, MASK_C | MASK_E | MASK_G); // n
-			} else {
-        			write_reg(MAX_REG_MASK_BOTH | 4, MASK_A | MASK_E | MASK_F | MASK_G); // F
-        			write_reg(MAX_REG_MASK_BOTH | 5, MASK_A | MASK_E | MASK_F | MASK_G); // F
-			}
+			switch(dst_mode) {
+                                case DST_OFF:
+                                        write_reg(MAX_REG_MASK_BOTH | 3, MASK_C | MASK_D | MASK_E | MASK_G); // o
+                                        write_reg(MAX_REG_MASK_BOTH | 4, MASK_A | MASK_E | MASK_F | MASK_G); // F
+                                        write_reg(MAX_REG_MASK_BOTH | 5, MASK_A | MASK_E | MASK_F | MASK_G); // F
+                                        break;
+                                case DST_EU:
+                                        write_reg(MAX_REG_MASK_BOTH | 3, MASK_A | MASK_D | MASK_E | MASK_F | MASK_G); // E
+                                        write_reg(MAX_REG_MASK_BOTH | 4, MASK_B | MASK_C | MASK_D | MASK_E | MASK_F); // U
+                                        break;
+                                case DST_US:
+                                        write_reg(MAX_REG_MASK_BOTH | 3, MASK_B | MASK_C | MASK_D | MASK_E | MASK_F); // U
+                                        write_reg(MAX_REG_MASK_BOTH | 4, MASK_A | MASK_C | MASK_D | MASK_F | MASK_G); // S
+                                        break;
+                                case DST_AU:
+                                        write_reg(MAX_REG_MASK_BOTH | 3, MASK_A | MASK_B | MASK_C | MASK_E | MASK_F | MASK_G); // A
+                                        write_reg(MAX_REG_MASK_BOTH | 4, MASK_B | MASK_C | MASK_D | MASK_E | MASK_F); // U
+                                        break;
+                        }
 			break;
 		case 4: // brightness
 			write_reg(MAX_REG_DEC_MODE, 0); // no decoding
@@ -512,7 +612,7 @@ static void menu_select() {
 			eeprom_write_byte(EE_AM_PM, ampm);
 			break;
 		case 3:
-			eeprom_write_byte(EE_DST_ENABLE, dst_enabled);
+			eeprom_write_byte(EE_DST_MODE, dst_mode);
 			break;
 		case 4:
 			eeprom_write_byte(EE_BRIGHTNESS, brightness);
@@ -532,7 +632,7 @@ static void menu_set() {
 			ampm = !ampm;
 			break;
 		case 3: // DST on/off
-			dst_enabled = !dst_enabled;
+			if (++dst_mode > DST_MODE_MAX) dst_mode = 0;
 			break;
 		case 4: // brightness
 			if (++brightness > 15) brightness = 0;
@@ -589,7 +689,8 @@ void main() {
 		tz_hour = -8;
 	else
 		tz_hour = ee_rd - 12;
-	dst_enabled = eeprom_read_byte(EE_DST_ENABLE);
+	dst_mode = eeprom_read_byte(EE_DST_MODE);
+	if (dst_mode > DST_MODE_MAX) dst_mode = DST_US;
 	ampm = eeprom_read_byte(EE_AM_PM);
 
 	gps_locked = 0;
