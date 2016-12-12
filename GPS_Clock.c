@@ -367,8 +367,8 @@ static void handleGPS() {
 		// that will be good enough. Don't worry that this can result in d being either 0
 		// or past the last day of the month. Neither of those will match the "decision day"
 		// for DST, which is the only day on which the day of the month is significant.
-		if (h + tz_hour < 0) d--;
-		if (h + tz_hour > 23) d++;
+		if (((int)h) + tz_hour < 0) d--;
+		if (((int)h) + tz_hour > 23) d++;
 		dst_flags = calculateDST(d, mon, y);
 #endif
 		handle_time(h, min, s, dst_flags);
