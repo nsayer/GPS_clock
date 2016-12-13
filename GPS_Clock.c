@@ -130,6 +130,9 @@
 #define SELECT 1
 #define SET 2
 
+// If we don't get a PPS at least this often, then we've lost it.
+#define LOST_PPS_TICKS 9000
+
 #endif
 
 volatile unsigned char disp_buf[8];
@@ -137,6 +140,7 @@ volatile unsigned char rx_buf[RX_BUF_LEN];
 volatile unsigned char rx_str_len;
 
 #ifndef HACKADAY_1K
+volatile unsigned int last_pps_tick;
 volatile unsigned char gps_locked;
 volatile char tz_hour;
 volatile unsigned char dst_mode;
@@ -502,6 +506,12 @@ static void write_no_sig() {
 
 ISR(INT0_vect) {
 #ifndef HACKADAY_1K
+	// XXX At some point, the hardware should be changed so that the PPS
+	// goes into the ICP pin instead and this ISR becomes TIMER1_CAPT_vect.
+	// When that happens, then we read ICR1 instead.
+	last_pps_tick = TCNT1;
+	if (last_pps_tick == 0) last_pps_tick++; // it can never be zero
+
 	if (menu_pos) return;
 	if (!gps_locked) {
 		write_no_sig();
@@ -705,6 +715,7 @@ void main() {
 	menu_pos = 0;
 	debounce_time = 0;
 	button_down = 0;
+	last_pps_tick = 0;
 #endif
 
 	// Turn off the shut-down register, clear the digit data
@@ -732,6 +743,16 @@ void main() {
 	while(1) {
 		wdt_reset();
 #ifndef HACKADAY_1K
+		// If we've not seen a PPS pulse in a certain amount of time, then
+		// without doing something like this, the wrong time would just get stuck.
+		unsigned int local_lpt;
+		ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
+			local_lpt = last_pps_tick;
+		}
+		if (local_lpt != 0 && TCNT1 - local_lpt > LOST_PPS_TICKS) {
+			write_no_sig();
+			last_pps_tick = 0;
+		}
 		unsigned char button = check_buttons();
 		if (!button) continue;
 
