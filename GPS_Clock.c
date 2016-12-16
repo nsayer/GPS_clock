@@ -23,6 +23,8 @@
 // Unfortunately, to stay within the 1K limit, we need to do away with
 // a *lot* of features.
 //#define HACKADAY_1K
+// V2 hardware has the PPS going into the ICP pin instead of INT0
+//#define V2
 
 #include <stdlib.h>  
 #include <stdio.h>  
@@ -141,14 +143,17 @@ volatile unsigned char rx_str_len;
 
 #ifndef HACKADAY_1K
 volatile unsigned int last_pps_tick;
+volatile unsigned int tenth_ticks;
 volatile unsigned char gps_locked;
-volatile char tz_hour;
 volatile unsigned char dst_mode;
 volatile unsigned char ampm;
 volatile unsigned char menu_pos;
+volatile unsigned char display_good;
+volatile char tz_hour;
 unsigned int debounce_time;
 unsigned char button_down;
 unsigned char brightness;
+unsigned char disp_tenth;
 #endif
 
 // Delay, but pet the watchdog while doing it.
@@ -493,6 +498,7 @@ ISR(USART0_RX_vect) {
 
 #ifndef HACKADAY_1K
 static void write_no_sig() {
+	display_good = 0;
 	// Clear out the digit data
 	write_reg(MAX_REG_CONFIG, MAX_REG_CONFIG_R | MAX_REG_CONFIG_S);
 	write_reg(MAX_REG_DEC_MODE, 0);
@@ -504,12 +510,23 @@ static void write_no_sig() {
 }
 #endif
 
+#ifdef V2
+ISR(TIMER1_CAPT_vect) {
+#else
 ISR(INT0_vect) {
+#endif
 #ifndef HACKADAY_1K
-	// XXX At some point, the hardware should be changed so that the PPS
-	// goes into the ICP pin instead and this ISR becomes TIMER1_CAPT_vect.
-	// When that happens, then we read ICR1 instead.
-	last_pps_tick = TCNT1;
+#ifdef V2
+	unsigned int this_tick = ICR1;
+#else
+	unsigned int this_tick = TCNT1;
+#endif
+	if (last_pps_tick != 0) {
+		tenth_ticks = (this_tick - last_pps_tick) / 10;
+	} else {
+		tenth_ticks = 0;
+	}
+	last_pps_tick = this_tick;
 	if (last_pps_tick == 0) last_pps_tick++; // it can never be zero
 
 	if (menu_pos) return;
@@ -517,12 +534,13 @@ ISR(INT0_vect) {
 		write_no_sig();
 		return;
 	}
+	display_good = 1;
 	// If we have an AM or PM set and if the 10 hours digit is 0, then blank it instead.
 	// Its value will be zero, so simply disabling the hex decode will result in no segments.
-	if (((disp_buf[6] & 0x80) != 0 || (disp_buf[7] & 0x80) != 0) && disp_buf[0] == 0) {
-		write_reg(MAX_REG_DEC_MODE, 0x3e); // full decode for first 5 digits. 10 hours blanked.
+	if (((disp_buf[6] & MASK_DP) != 0 || (disp_buf[7] & MASK_DP) != 0) && disp_buf[0] == 0) {
+		write_reg(MAX_REG_DEC_MODE, tenth_ticks?0x7e:0x3e); // full decode for first 5 digits. 10 hours blanked.
 	} else {
-		write_reg(MAX_REG_DEC_MODE, 0x3f); // full decode for 6 digits.
+		write_reg(MAX_REG_DEC_MODE, tenth_ticks?0x7f:0x3f); // full decode for 6 digits.
 	}
 #else
 	write_reg(MAX_REG_DEC_MODE, 0x3f); // full decode for 6 digits.
@@ -566,6 +584,7 @@ static void menu_render() {
 			// we're returning to time mode. Either leave it blank or indicate no signal.
 			if (!gps_locked)
 				write_no_sig();
+			display_good = 0;
 			break;
 		case 1: // zone
 			write_reg(MAX_REG_DEC_MODE, 0x30); // decoding for last two digits only
@@ -623,6 +642,9 @@ static void menu_render() {
 
 static void menu_select() {
 	switch(menu_pos) {
+		case 0:
+			display_good = 0;
+			break;
 		case 1:
 			eeprom_write_byte(EE_TIMEZONE, tz_hour + 12);
 			break;
@@ -694,13 +716,20 @@ void main() {
 	// 8N1
 	UCSR0C = _BV(UCSZ00) | _BV(UCSZ01);
 
+#ifndef V2
 	MCUCR = _BV(ISC01) | _BV(ISC00); // INT0 on rising edge
 	GIMSK = _BV(INT0); // enable INT0
+#endif
 
 	rx_str_len = 0;
 
 #ifndef HACKADAY_1K
+#ifdef V2
+	TCCR1B = _BV(ICES1) | _BV(CS12) | _BV(CS10); // prescale by 1024, capture on rising edge
+	TIMSK1 = _BV(ICIE1); // interrupt on capture
+#else
 	TCCR1B = _BV(CS12) | _BV(CS10); // prescale by 1024
+#endif
 
 	unsigned char ee_rd = eeprom_read_byte(EE_TIMEZONE);
 	if (ee_rd == 0xff)
@@ -716,6 +745,9 @@ void main() {
 	debounce_time = 0;
 	button_down = 0;
 	last_pps_tick = 0;
+	tenth_ticks = 0;
+	display_good = 0;
+	disp_tenth = 0;
 #endif
 
 	// Turn off the shut-down register, clear the digit data
@@ -752,6 +784,15 @@ void main() {
 		if (local_lpt != 0 && TCNT1 - local_lpt > LOST_PPS_TICKS) {
 			write_no_sig();
 			last_pps_tick = 0;
+			continue;
+		}
+		if (tenth_ticks != 0 && display_good) {
+			unsigned int current_tick = TCNT1 - local_lpt;
+			unsigned int current_tenth = (current_tick / tenth_ticks) % 10;
+			if (disp_tenth != current_tenth) {
+				write_reg(MAX_REG_MASK_BOTH | 6, current_tenth | (disp_buf[6] & MASK_DP));
+				disp_tenth = current_tenth;
+			}
 		}
 		unsigned char button = check_buttons();
 		if (!button) continue;
