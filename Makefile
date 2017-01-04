@@ -8,7 +8,7 @@ CHIP = attiny841
 CC = avr-gcc
 OBJCPY = avr-objcopy
 AVRDUDE = avrdude
-OPTS = -Os -g -ffreestanding -std=c99 -Wall
+OPTS = -Os -g -std=c11 -Wall -Wno-main
 
 CFLAGS = -mmcu=$(CHIP) $(OPTS)
 
