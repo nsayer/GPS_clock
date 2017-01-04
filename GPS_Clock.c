@@ -19,12 +19,13 @@
     
   */
 
+// Fuse settings: lfuse=0xe2, hfuse=0xdf, efuse=0xff
 
 // Unfortunately, to stay within the 1K limit, we need to do away with
 // a *lot* of features.
 //#define HACKADAY_1K
 // V2 hardware has the PPS going into the ICP pin instead of INT0
-//#define V2
+#define V2
 
 #include <stdlib.h>  
 #include <stdio.h>  
@@ -390,7 +391,7 @@ static void handle_time(char h, unsigned char m, unsigned char s, unsigned char 
 	}
 #endif
 
-	disp_buf[5] = s % 10;
+	disp_buf[5] = (s % 10) | MASK_DP;
 	disp_buf[4] = s / 10;
 	disp_buf[3] = (m % 10) | MASK_DP;
 	disp_buf[2] = m / 10;
@@ -554,6 +555,7 @@ ISR(INT0_vect) {
 #ifndef HACKADAY_1K
 static unsigned char check_buttons() {
 	if (debounce_time != 0 && TCNT1 - debounce_time < DEBOUNCE_TICKS) {
+		// We don't pay any attention to the buttons during debounce time.
 		return 0;
 	} else {
 		debounce_time = 0; // debounce is over
@@ -561,24 +563,25 @@ static unsigned char check_buttons() {
 	unsigned char status = PORT_SW & (SW_0_BIT | SW_1_BIT);
 	status ^= (SW_0_BIT | SW_1_BIT); // invert the buttons - 0 means down.
 	if (!((button_down == 0) ^ (status == 0))) return 0; // either no button is down, or a button is still down
+
+	// Something *changed*, which means we must now start a debounce interval.
+	debounce_time = TCNT1;
+	if (!debounce_time) debounce_time++; // it's not allowed to be zero
+
 	if (!button_down && status) {
 		button_down = 1; // a button has been pushed
-		debounce_time = TCNT1;
-		if (!debounce_time) debounce_time++; // it's not allowed to be zero
-		return (status & SW_0_BIT)?SELECT:SET;
+		return (status & SW_1_BIT)?SELECT:SET;
 	}
 	if (button_down && !status) {
-		button_down = 0; // a button is no longer down
-		debounce_time = TCNT1;
-		if (!debounce_time) debounce_time++; // it's not allowed to be zero
+		button_down = 0; // a button has been released
 		return 0;
 	}
-	return 0; // This should never actually happen
+	__builtin_unreachable(); // we'll never get here.
 }
 
 static void menu_render() {
-			// blank the display
-			write_reg(MAX_REG_CONFIG, MAX_REG_CONFIG_R | MAX_REG_CONFIG_S);
+	// blank the display
+	write_reg(MAX_REG_CONFIG, MAX_REG_CONFIG_R | MAX_REG_CONFIG_S);
 	switch(menu_pos) {
 		case 0:
 			// we're returning to time mode. Either leave it blank or indicate no signal.
@@ -640,7 +643,7 @@ static void menu_render() {
 	}
 }
 
-static void menu_select() {
+static void menu_set() {
 	switch(menu_pos) {
 		case 0:
 			display_good = 0;
@@ -662,7 +665,7 @@ static void menu_select() {
 	menu_render();
 }
 
-static void menu_set() {
+static void menu_select() {
 	switch(menu_pos) {
 		case 0: return; // ignore SET when just running
 		case 1: // timezone
@@ -683,7 +686,8 @@ static void menu_set() {
 
 #endif
 
-void main() {
+// main() never returns.
+void __ATTR_NORETURN__ main(void) {
 
 	wdt_enable(WDTO_1S);
 
@@ -807,4 +811,5 @@ void main() {
 		}
 #endif
 	}
+	__builtin_unreachable();
 }
