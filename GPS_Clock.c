@@ -554,7 +554,12 @@ ISR(INT0_vect) {
 
 #ifndef HACKADAY_1K
 static unsigned char check_buttons() {
-	if (debounce_time != 0 && TCNT1 - debounce_time < DEBOUNCE_TICKS) {
+	// TCNT1 is a 16 bit register - it must be read atomically.
+	unsigned int tcnt1;
+	ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
+		tcnt1 = TCNT1;
+	}
+	if (debounce_time != 0 && tcnt1 - debounce_time < DEBOUNCE_TICKS) {
 		// We don't pay any attention to the buttons during debounce time.
 		return 0;
 	} else {
@@ -565,7 +570,7 @@ static unsigned char check_buttons() {
 	if (!((button_down == 0) ^ (status == 0))) return 0; // either no button is down, or a button is still down
 
 	// Something *changed*, which means we must now start a debounce interval.
-	debounce_time = TCNT1;
+	debounce_time = tcnt1;
 	if (!debounce_time) debounce_time++; // it's not allowed to be zero
 
 	if (!button_down && status) {
@@ -781,17 +786,18 @@ void __ATTR_NORETURN__ main(void) {
 #ifndef HACKADAY_1K
 		// If we've not seen a PPS pulse in a certain amount of time, then
 		// without doing something like this, the wrong time would just get stuck.
-		unsigned int local_lpt;
+		unsigned int local_lpt, tcnt1;
 		ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
 			local_lpt = last_pps_tick;
+			tcnt1 = TCNT1;
 		}
-		if (local_lpt != 0 && TCNT1 - local_lpt > LOST_PPS_TICKS) {
+		if (local_lpt != 0 && tcnt1 - local_lpt > LOST_PPS_TICKS) {
 			write_no_sig();
 			last_pps_tick = 0;
 			continue;
 		}
 		if (tenth_ticks != 0 && display_good) {
-			unsigned int current_tick = TCNT1 - local_lpt;
+			unsigned int current_tick = tcnt1 - local_lpt;
 			unsigned int current_tenth = (current_tick / tenth_ticks) % 10;
 			if (disp_tenth != current_tenth) {
 				write_reg(MAX_REG_MASK_BOTH | 6, current_tenth | (disp_buf[6] & MASK_DP));
