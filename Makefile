@@ -19,7 +19,7 @@ CFLAGS = -mmcu=$(CHIP) $(OPTS)
 	$(OBJCPY) -j .text -j .data -O ihex $^ $@
 
 %.elf: %.o
-	$(CC) $(CFLAGS) -o $@ $^ -lm
+	$(CC) $(CFLAGS) -o $@ $^
 
 all:	$(OUT).hex $(OUT).hex
 
