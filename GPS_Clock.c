@@ -159,13 +159,13 @@ unsigned char disp_tenth;
 
 // Delay, but pet the watchdog while doing it.
 static void Delay(unsigned long ms) {
-  while(ms > 100) {
-    _delay_ms(100);
-    wdt_reset();
-    ms -= 100;
-  }
-  _delay_ms(ms);
-  wdt_reset();
+	while(ms > 100) {
+		_delay_ms(100);
+		wdt_reset();
+		ms -= 100;
+	}
+	_delay_ms(ms);
+	wdt_reset();
 }
 
 void write_reg(const unsigned char addr, const unsigned char val) {
@@ -204,7 +204,7 @@ const unsigned int first_day[] PROGMEM = {0, 31, 59, 90, 120, 151, 181, 212, 243
 // If you're alive beyond that, then this is a Y2.1K bug for you to fix.
 // You also get to figure out what to do about the NMEA two-digit
 // year format. And probably update the GPS firmware or buy a new module.
-static unsigned char first_sunday(unsigned char m, unsigned char y) {
+static unsigned char first_sunday(const unsigned char m, const unsigned char y) {
 	unsigned int day_of_year = 0;
 	// after March, leap year comes into play
 	if (m > 2) {
@@ -236,7 +236,7 @@ static unsigned char first_sunday(unsigned char m, unsigned char y) {
 	// Now figure out how many days before we hit a Sunday. But if we're already there, then just return 1.
 	return (weekday == 0)?1:(8 - weekday);
 }
-static unsigned char calculateDSTAU(unsigned char d, unsigned char m, unsigned char y) {
+static unsigned char calculateDSTAU(const unsigned char d, const unsigned char m, const unsigned char y) {
         // DST is in effect between the first Sunday in October and the first Sunday in April
         unsigned char change_day;
         switch(m) {
@@ -268,7 +268,7 @@ static unsigned char calculateDSTAU(unsigned char d, unsigned char m, unsigned c
                         return 255;
         }
 }
-static unsigned char calculateDSTEU(unsigned char d, unsigned char m, unsigned char y) {
+static unsigned char calculateDSTEU(const unsigned char d, const unsigned char m, const unsigned char y) {
         // DST is in effect between the last Sunday in March and the last Sunday in October
         unsigned char change_day;
         switch(m) {
@@ -302,7 +302,7 @@ static unsigned char calculateDSTEU(unsigned char d, unsigned char m, unsigned c
                         return 255;
         }
 }
-static unsigned char calculateDSTUS(unsigned char d, unsigned char m, unsigned char y) {
+static unsigned char calculateDSTUS(const unsigned char d, const unsigned char m, const unsigned char y) {
 	// DST is in effect between the 2nd Sunday in March and the first Sunday in November
 	// The return values here are that DST is in effect, or it isn't, or it's beginning
 	// for the year today or it's ending today.
@@ -336,7 +336,7 @@ static unsigned char calculateDSTUS(unsigned char d, unsigned char m, unsigned c
 			return 255;
 	}
 }
-static unsigned char calculateDST(unsigned char d, unsigned char m, unsigned char y) {
+static unsigned char calculateDST(const unsigned char d, const unsigned char m, const unsigned char y) {
         switch(dst_mode) {
                 case DST_US:
                         return calculateDSTUS(d, m, y);
@@ -407,9 +407,9 @@ static void handle_time(char h, unsigned char m, unsigned char s, unsigned char 
 #endif
 }
 
-static char* skip_commas(char *ptr, int num) {
+static const char *skip_commas(const char *ptr, const int num) {
 	for(int i = 0; i < num; i++) {
-		ptr = strchr((const char *)ptr, ',');
+		ptr = strchr(ptr, ',');
 		if (ptr == NULL) return NULL; // not enough commas
 		ptr++; // skip over it
 	}
@@ -445,8 +445,8 @@ static void handleGPS() {
 		return; // bad checksum.
 	}
   
-	char *ptr = (char *)rx_buf;
-	if (!strncmp_P((const char*)rx_buf, PSTR("$GPRMC"), 6)) {
+	const char *ptr = (char *)rx_buf;
+	if (!strncmp_P(ptr, PSTR("$GPRMC"), 6)) {
 		// $GPRMC,172313.000,A,xxxx.xxxx,N,xxxxx.xxxx,W,0.01,180.80,260516,,,D*74\x0d\x0a
 		ptr = skip_commas(ptr, 1);
 		if (ptr == NULL) return; // not enough commas
@@ -471,7 +471,7 @@ static void handleGPS() {
 #endif
 		handle_time(h, min, s, dst_flags);
 #ifndef HACKADAY_1K
-	} else if (!strncmp_P((const char*)rx_buf, PSTR("$GPGSA"), 6)) {
+	} else if (!strncmp_P(ptr, PSTR("$GPGSA"), 6)) {
 		// $GPGSA,A,3,02,06,12,24,25,29,,,,,,,1.61,1.33,0.90*01
 		ptr = skip_commas(ptr, 2);
 		if (ptr == NULL) return; // not enough commas
@@ -481,20 +481,20 @@ static void handleGPS() {
 }
 
 ISR(USART0_RX_vect) {
-  unsigned char rx_char = UDR0;
+	unsigned char rx_char = UDR0;
   
-  if (rx_str_len == 0 && rx_char != '$') return; // wait for a "$" to start the line.
-  rx_buf[rx_str_len] = rx_char;
-  if (rx_char == 0x0d || rx_char == 0x0a) {
-    rx_buf[rx_str_len] = 0; // null terminate
-    handleGPS();
-    rx_str_len = 0; // now clear the buffer
-    return;
-  }
-  if (++rx_str_len == RX_BUF_LEN) {
-    // The string is too long. Start over.
-    rx_str_len = 0;
-  }
+	if (rx_str_len == 0 && rx_char != '$') return; // wait for a "$" to start the line.
+	rx_buf[rx_str_len] = rx_char;
+	if (rx_char == 0x0d || rx_char == 0x0a) {
+		rx_buf[rx_str_len] = 0; // null terminate
+		handleGPS();
+		rx_str_len = 0; // now clear the buffer
+		return;
+	}
+	if (++rx_str_len == RX_BUF_LEN) {
+		// The string is too long. Start over.
+		rx_str_len = 0;
+	}
 }
 
 #ifndef HACKADAY_1K
@@ -763,10 +763,8 @@ void __ATTR_NORETURN__ main(void) {
 	write_reg(MAX_REG_CONFIG, MAX_REG_CONFIG_R | MAX_REG_CONFIG_S);
 	write_reg(MAX_REG_SCAN_LIMIT, 7); // display all 8 digits
 #ifndef HACKADAY_1K
-	{
-		brightness = eeprom_read_byte(EE_BRIGHTNESS) & 0xf;
-		write_reg(MAX_REG_INTENSITY, brightness);
-	}
+	brightness = eeprom_read_byte(EE_BRIGHTNESS) & 0xf;
+	write_reg(MAX_REG_INTENSITY, brightness);
 #else
 	write_reg(MAX_REG_INTENSITY, 0xf); // Full intensity
 #endif
