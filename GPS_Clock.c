@@ -498,8 +498,6 @@ static void write_no_sig() {
         write_reg(MAX_REG_MASK_BOTH | 3, MASK_A | MASK_C | MASK_D | MASK_E | MASK_F | MASK_G); // G
         write_reg(MAX_REG_MASK_BOTH | 4, MASK_A | MASK_B | MASK_E | MASK_F | MASK_G); // P
         write_reg(MAX_REG_MASK_BOTH | 5, MASK_A | MASK_C | MASK_D | MASK_F | MASK_G); // S
-        write_reg(MAX_REG_MASK_BOTH | 6, 0);
-        write_reg(MAX_REG_MASK_BOTH | 7, 0);
 }
 
 #ifdef V2
