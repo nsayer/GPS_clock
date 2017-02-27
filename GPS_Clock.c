@@ -87,6 +87,12 @@
 #define MASK_F _BV(1)
 #define MASK_G _BV(0)
 
+// Digit 7 has the two colons and the AM & PM lights
+#define MASK_COLON_HM (MASK_E | MASK_F)
+#define MASK_COLON_MS (MASK_B | MASK_C)
+#define MASK_AM (MASK_A)
+#define MASK_PM (MASK_D)
+
 #define RX_BUF_LEN (96)
 
 // Port B is the switches and the PPS GPS input
@@ -114,7 +120,13 @@
 #define DST_US 1
 #define DST_EU 2
 #define DST_AU 3
-#define DST_MODE_MAX DST_AU
+#define DST_NZ 4
+#define DST_MODE_MAX DST_NZ
+
+#define COLON_OFF 0
+#define COLON_ON 1
+#define COLON_BLINK 2
+#define COLON_STATE_MAX COLON_BLINK
 
 // EEPROM locations to store the configuration.
 #define EE_TIMEZONE ((uint8_t*)0)
@@ -122,6 +134,7 @@
 #define EE_AM_PM ((uint8_t*)2)
 #define EE_BRIGHTNESS ((uint8_t*)3)
 #define EE_TENTHS ((uint8_t*)4)
+#define EE_COLONS ((uint8_t*)5)
 
 // This is the timer frequency - it's the system clock prescaled by 1024
 #define F_TICK (F_CPU / 1024)
@@ -154,6 +167,7 @@ volatile unsigned char menu_pos;
 volatile char tz_hour;
 volatile unsigned char tenth_enable;
 volatile unsigned char disp_tenth;
+unsigned char colon_state;
 unsigned int debounce_time;
 unsigned char button_down;
 unsigned char brightness;
@@ -268,6 +282,39 @@ static unsigned char calculateDSTAU(const unsigned char d, const unsigned char m
                         return 255;
         }
 }
+static unsigned char calculateDSTNZ(const unsigned char d, const unsigned char m, const unsigned char y) {
+        // DST is in effect between the last Sunday in September and the first Sunday in April
+        unsigned char change_day;
+        switch(m) {
+                case 1: // October through March
+                case 2:
+                case 3:
+                case 10:
+                case 11:
+                case 12:
+                        return DST_YES;
+                case 4: // April
+                        change_day = first_sunday(m, y);
+                        if (d < change_day) return DST_YES;
+                        else if (d == change_day) return DST_ENDS;
+                        else return DST_NO;
+                        break;
+                case 5: // April through August
+                case 6:
+                case 7:
+                case 8:
+                        return DST_NO;
+                case 9: // September
+                        change_day = first_sunday(m, y);
+                        while(change_day + 7 < 30) change_day += 7; // last Sunday
+                        if (d < change_day) return DST_NO;
+                        else if (d == change_day) return DST_BEGINS;
+                        else return DST_YES;
+                        break;
+                default: // This is impossible, since m can only be between 1 and 12.
+                        return 255;
+        }
+}
 static unsigned char calculateDSTEU(const unsigned char d, const unsigned char m, const unsigned char y) {
         // DST is in effect between the last Sunday in March and the last Sunday in October
         unsigned char change_day;
@@ -279,7 +326,7 @@ static unsigned char calculateDSTEU(const unsigned char d, const unsigned char m
                         return DST_NO;
                 case 3: // March
                         change_day = first_sunday(m, y);
-                        while(change_day + 7 < 30) change_day += 7; // last Sunday
+                        while(change_day + 7 < 31) change_day += 7; // last Sunday
                         if (d < change_day) return DST_NO;
                         else if (d == change_day) return DST_BEGINS;
                         else return DST_YES;
@@ -344,6 +391,8 @@ static unsigned char calculateDST(const unsigned char d, const unsigned char m, 
                         return calculateDSTEU(d, m, y);
                 case DST_AU:
                         return calculateDSTAU(d, m, y);
+                case DST_NZ:
+                        return calculateDSTNZ(d, m, y);
                 default: // off - should never happen
                         return DST_NO;
         }
@@ -390,15 +439,23 @@ static void handle_time(char h, unsigned char m, unsigned char s, unsigned char 
 
 	disp_buf[5] = (s % 10) | MASK_DP;
 	disp_buf[4] = s / 10;
-	disp_buf[3] = (m % 10) | MASK_DP;
+	disp_buf[3] = (m % 10);
 	disp_buf[2] = m / 10;
-	disp_buf[1] = (h % 10) | MASK_DP;
+	disp_buf[1] = (h % 10);
 	disp_buf[0] = h / 10;
+	disp_buf[6] = disp_buf[7] = 0;
 	if (ampm) {
-		disp_buf[7] = am ? MASK_DP:0;
-		disp_buf[6] = (!am) ? MASK_DP:0;
-	} else {
-		disp_buf[6] = disp_buf[7] = 0;
+#if 1
+		disp_buf[7] |= am ? MASK_AM : MASK_PM;
+#else
+		if (am)
+			disp_buf[7] |= MASK_DP;
+		else
+			disp_buf[6] |= MASK_DP;
+#endif
+	}
+	if (colon_state == COLON_ON || colon_state == COLON_BLINK) {
+		disp_buf[7] |= MASK_COLON_HM | MASK_COLON_MS;
 	}
 }
 
@@ -491,7 +548,7 @@ ISR(USART0_RX_vect) {
 static void write_no_sig() {
 	tenth_ticks = 0;
 	// Clear out the digit data
-	write_reg(MAX_REG_CONFIG, MAX_REG_CONFIG_R | MAX_REG_CONFIG_S);
+	write_reg(MAX_REG_CONFIG, MAX_REG_CONFIG_R | MAX_REG_CONFIG_B | MAX_REG_CONFIG_S | MAX_REG_CONFIG_E);
 	write_reg(MAX_REG_DEC_MODE, 0);
         write_reg(MAX_REG_MASK_BOTH | 0, MASK_C | MASK_E | MASK_G); // n
         write_reg(MAX_REG_MASK_BOTH | 1, MASK_C | MASK_D | MASK_E | MASK_G); // o
@@ -528,23 +585,31 @@ ISR(INT0_vect) {
 		write_no_sig();
 		return;
 	}
-	// If we have an AM or PM set and if the 10 hours digit is 0, then blank it instead.
-	// Its value will be zero, so simply disabling the hex decode will result in no segments.
-	if (((disp_buf[6] & MASK_DP) != 0 || (disp_buf[7] & MASK_DP) != 0) && disp_buf[0] == 0) {
-		write_reg(MAX_REG_DEC_MODE, tenth_ticks?0x7e:0x3e); // full decode for first 5 digits. 10 hours blanked.
-	} else {
-		write_reg(MAX_REG_DEC_MODE, tenth_ticks?0x7f:0x3f); // full decode for 6 digits.
-	}
-	disp_tenth = 0; // right now, 0 is showing.
 
-	// If we're not going to show the tenths, then get rid of the decimal
-	// at the end of the seconds.
-	if (tenth_ticks == 0)
-		disp_buf[5] &= ~MASK_DP;
+	// Hit the T bit so that the blink counter is cleared
+	write_reg(MAX_REG_CONFIG, MAX_REG_CONFIG_B | MAX_REG_CONFIG_S | MAX_REG_CONFIG_E | MAX_REG_CONFIG_T);
+        unsigned char decode_mask = 0x7f; // assume decoding for all digits
+	// If we are doing 12 digit display and if the 10 hours digit is 0, then blank it instead.
+	// Its value will be zero, so simply disabling the hex decode will result in no segments.
+	if (ampm && disp_buf[0] == 0) {
+		decode_mask &= ~0x1; // No decode for tens-of-hours digit
+	}
+	// If we're not going to show the tenths...
+	if (tenth_ticks == 0) {
+		decode_mask &= ~0x40; // No decode for tenth digit
+		disp_buf[5] &= ~MASK_DP; // no decimal point on seconds digit
+	}
+	write_reg(MAX_REG_DEC_MODE, decode_mask);
+
+	disp_tenth = 0; // right now, 0 is showing.
 
 	// Copy the display buffer data into the display
 	for(int i = 0; i < sizeof(disp_buf); i++) {
 		write_reg(MAX_REG_MASK_BOTH | i, disp_buf[i]);
+	}
+	if (colon_state == COLON_BLINK) {
+		// If we're blinking, then clear P1's colons out.
+		write_reg(MAX_REG_MASK_P1 | 7, disp_buf[7] & ~(MASK_COLON_HM | MASK_COLON_MS));
 	}
 }
 
@@ -582,7 +647,7 @@ static unsigned char check_buttons() {
 static void menu_render() {
 	// blank the display
 	write_reg(MAX_REG_DEC_MODE, 0); // no decoding
-	write_reg(MAX_REG_CONFIG, MAX_REG_CONFIG_R | MAX_REG_CONFIG_S);
+	write_reg(MAX_REG_CONFIG, MAX_REG_CONFIG_R | MAX_REG_CONFIG_B | MAX_REG_CONFIG_S | MAX_REG_CONFIG_E);
 	switch(menu_pos) {
 		case 0:
 			// we're returning to time mode. Either leave it blank or indicate no signal.
@@ -600,14 +665,7 @@ static void menu_render() {
         		write_reg(MAX_REG_MASK_BOTH | 4, abs(tz_hour) / 10);
         		write_reg(MAX_REG_MASK_BOTH | 5, abs(tz_hour) % 10);
 			break;
-		case 2: // 12/24 hour
-			write_reg(MAX_REG_DEC_MODE, 0x6); // decoding for first two digits only (skipping one)
-        		write_reg(MAX_REG_MASK_BOTH | 1, ampm?1:2);
-        		write_reg(MAX_REG_MASK_BOTH | 2, ampm?2:4);
-        		write_reg(MAX_REG_MASK_BOTH | 4, MASK_C | MASK_E | MASK_F | MASK_G); // h
-        		write_reg(MAX_REG_MASK_BOTH | 5, MASK_E | MASK_G); // r
-			break;
-		case 3: // DST on/off
+		case 2: // DST on/off
 			write_reg(MAX_REG_DEC_MODE, 0); // no decoding
         		write_reg(MAX_REG_MASK_BOTH | 0, MASK_B | MASK_C | MASK_D | MASK_E | MASK_G); // d
         		write_reg(MAX_REG_MASK_BOTH | 1, MASK_A | MASK_C | MASK_D | MASK_F | MASK_G); // S
@@ -629,7 +687,18 @@ static void menu_render() {
                                         write_reg(MAX_REG_MASK_BOTH | 3, MASK_A | MASK_B | MASK_C | MASK_E | MASK_F | MASK_G); // A
                                         write_reg(MAX_REG_MASK_BOTH | 4, MASK_B | MASK_C | MASK_D | MASK_E | MASK_F); // U
                                         break;
+                                case DST_NZ:
+                                        write_reg(MAX_REG_MASK_BOTH | 3, MASK_C | MASK_E | MASK_G); // n
+                                        write_reg(MAX_REG_MASK_BOTH | 4, MASK_A | MASK_B | MASK_D | MASK_E | MASK_G); // Z
+                                        break;
                         }
+			break;
+		case 3: // 12/24 hour
+			write_reg(MAX_REG_DEC_MODE, 0x6); // decoding for first two digits only (skipping one)
+        		write_reg(MAX_REG_MASK_BOTH | 1, ampm?1:2);
+        		write_reg(MAX_REG_MASK_BOTH | 2, ampm?2:4);
+        		write_reg(MAX_REG_MASK_BOTH | 4, MASK_C | MASK_E | MASK_F | MASK_G); // h
+        		write_reg(MAX_REG_MASK_BOTH | 5, MASK_E | MASK_G); // r
 			break;
 		case 4: // tenths enabled
 			write_reg(MAX_REG_DEC_MODE, 3); // decode only first two digits
@@ -644,7 +713,26 @@ static void menu_render() {
 				write_reg(MAX_REG_MASK_BOTH | 5, MASK_A | MASK_E | MASK_F | MASK_G); // F
 			}
 			break;
-		case 5: // brightness
+		case 5: // colons enabled
+			write_reg(MAX_REG_DEC_MODE, 0); // decode only first two digits
+        		write_reg(MAX_REG_MASK_BOTH | 0, MASK_A | MASK_D | MASK_E | MASK_F); // C
+        		write_reg(MAX_REG_MASK_BOTH | 1, MASK_C | MASK_D | MASK_E | MASK_G); // o
+        		write_reg(MAX_REG_MASK_BOTH | 2, MASK_D | MASK_E | MASK_F); // L
+        		write_reg(MAX_REG_MASK_BOTH | 3, MASK_C | MASK_D | MASK_E | MASK_G); // o
+			write_reg(MAX_REG_MASK_BOTH | 4, MASK_C | MASK_E | MASK_G); // n
+			write_reg(MAX_REG_MASK_BOTH | 5, MASK_A | MASK_C | MASK_D | MASK_F | MASK_G); // S
+			switch(colon_state) {
+				case COLON_OFF: // nothing
+					break;
+				case COLON_ON: // on solid
+					write_reg(MAX_REG_MASK_BOTH | 7, MASK_COLON_HM | MASK_COLON_MS);
+					break;
+				case COLON_BLINK: // blink - write to only P0
+					write_reg(MAX_REG_MASK_P0 | 7, MASK_COLON_HM | MASK_COLON_MS);
+					break;
+			}
+			break;
+		case 6: // brightness
 			write_reg(MAX_REG_DEC_MODE, 0); // no decoding
         		write_reg(MAX_REG_MASK_BOTH | 0, MASK_C | MASK_D | MASK_E | MASK_F | MASK_G); // b
         		write_reg(MAX_REG_MASK_BOTH | 1, MASK_E | MASK_G); // r
@@ -666,19 +754,22 @@ static void menu_set() {
 			eeprom_write_byte(EE_TIMEZONE, tz_hour + 12);
 			break;
 		case 2:
-			eeprom_write_byte(EE_AM_PM, ampm);
+			eeprom_write_byte(EE_DST_MODE, dst_mode);
 			break;
 		case 3:
-			eeprom_write_byte(EE_DST_MODE, dst_mode);
+			eeprom_write_byte(EE_AM_PM, ampm);
 			break;
 		case 4:
 			eeprom_write_byte(EE_TENTHS, tenth_enable);
 			break;
 		case 5:
+			eeprom_write_byte(EE_COLONS, colon_state);
+			break;
+		case 6:
 			eeprom_write_byte(EE_BRIGHTNESS, brightness);
 			break;
 	}
-	if (++menu_pos > 5) menu_pos = 0;
+	if (++menu_pos > 6) menu_pos = 0;
 	menu_render();
 }
 
@@ -688,16 +779,19 @@ static void menu_select() {
 		case 1: // timezone
 			if (++tz_hour >= 13) tz_hour = -12;
 			break;
-		case 2: // 12/24 hour
-			ampm = !ampm;
-			break;
-		case 3: // DST on/off
+		case 2: // DST on/off
 			if (++dst_mode > DST_MODE_MAX) dst_mode = 0;
+			break;
+		case 3: // 12/24 hour
+			ampm = !ampm;
 			break;
 		case 4: // tenths enabled
 			tenth_enable = !tenth_enable;
 			break;
-		case 5: // brightness
+		case 5: // colons
+			if (++colon_state > COLON_STATE_MAX) colon_state = 0;
+			break;
+		case 6: // brightness
 			if (++brightness > 15) brightness = 0;
 			break;
 	}
@@ -764,12 +858,14 @@ void __ATTR_NORETURN__ main(void) {
 	disp_tenth = 0;
 
 	// Turn off the shut-down register, clear the digit data
-	write_reg(MAX_REG_CONFIG, MAX_REG_CONFIG_R | MAX_REG_CONFIG_S);
+	write_reg(MAX_REG_CONFIG, MAX_REG_CONFIG_R | MAX_REG_CONFIG_B | MAX_REG_CONFIG_S | MAX_REG_CONFIG_E);
 	write_reg(MAX_REG_SCAN_LIMIT, 7); // display all 8 digits
 	brightness = eeprom_read_byte(EE_BRIGHTNESS) & 0xf;
 	write_reg(MAX_REG_INTENSITY, brightness);
 
 	tenth_enable = eeprom_read_byte(EE_TENTHS) != 0;
+        colon_state = eeprom_read_byte(EE_COLONS);
+	if (colon_state > COLON_STATE_MAX) colon_state = 1; // default to just on.
 
 	// Turn on the self-test for a second
 	write_reg(MAX_REG_TEST, 1);
@@ -798,6 +894,8 @@ void __ATTR_NORETURN__ main(void) {
 			unsigned int current_tick = tcnt1 - local_lpt;
 			unsigned int current_tenth = (current_tick / tenth_ticks) % 10;
 			if (disp_tenth != current_tenth) {
+				// Write the tenth-of-a-second digit, preserving the
+				// decimal point state (just in case)
 				write_reg(MAX_REG_MASK_BOTH | 6, current_tenth | (disp_buf[6] & MASK_DP));
 				disp_tenth = current_tenth;
 			}
