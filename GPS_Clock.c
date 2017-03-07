@@ -65,9 +65,9 @@
 #define MAX_REG_CONFIG_S _BV(0)
 #define MAX_REG_TEST 0x07
 // P0 and P1 are planes - used when blinking is turned on
-// or the mask with the digit number 0-7. On the hardware, 0-5
-// are the digits from left to right (D5 is single seconds, D0
-// is tens of hours). The D7 and D6 decimal points are AM and PM (respectively).
+// or the mask with the digit number 0-7. On the hardware, 0-6
+// are the digits from left to right (D6 is tenths of seconds, D0
+// is tens of hours). D7 is AM, PM and the four LEDs for the colons.
 // To blink, you write different stuff to P1 and P0 and turn on
 // blinking in the config register (bit E to turn on, bit B for speed).
 #define MAX_REG_MASK_P0 0x20
@@ -432,9 +432,7 @@ static void handle_time(char h, unsigned char m, unsigned char s, unsigned char 
 		// Create AM or PM
                 if (h == 0) { h = 12; am = 1; }
 		else if (h < 12) { am = 1; }
-		else {
-			if (h > 12) h -= 12;
-		}
+		else if (h > 12) h -= 12;
 	}
 
 	disp_buf[5] = (s % 10) | MASK_DP;
@@ -448,6 +446,7 @@ static void handle_time(char h, unsigned char m, unsigned char s, unsigned char 
 #if 1
 		disp_buf[7] |= am ? MASK_AM : MASK_PM;
 #else
+// Early hardware used the digit 6 and 7 DPs for AM/PM.
 		if (am)
 			disp_buf[7] |= MASK_DP;
 		else
