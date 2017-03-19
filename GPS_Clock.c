@@ -177,6 +177,7 @@ volatile unsigned char menu_pos;
 volatile char tz_hour;
 volatile unsigned char tenth_enable;
 volatile unsigned char disp_tenth;
+volatile unsigned char tenth_dp;
 unsigned char colon_state;
 unsigned int debounce_time;
 unsigned char button_down;
@@ -458,9 +459,9 @@ static void handle_time(char h, unsigned char m, unsigned char s, unsigned char 
 #else
 // Early hardware used the digit 6 and 7 DPs for AM/PM.
 		if (am)
-			disp_buf[7] |= MASK_DP;
+			disp_buf[DIGIT_MISC] |= MASK_DP;
 		else
-			disp_buf[6] |= MASK_DP;
+			disp_buf[DIGIT_100_MSEC] |= MASK_DP;
 #endif
 	}
 	if (colon_state == COLON_ON || colon_state == COLON_BLINK) {
@@ -620,6 +621,12 @@ ISR(INT0_vect) {
 		// If we're blinking, then clear P1's colons out.
 		write_reg(MAX_REG_MASK_P1 | DIGIT_MISC, disp_buf[DIGIT_MISC] & ~(MASK_COLON_HM | MASK_COLON_MS));
 	}
+	// Watch out, there's an old bug lurking here. disp_buf[] gets
+	// updated with data for the *next* second early on during *this*
+	// second. If the tenth DP is ever used for anything time related,
+	// (it used to be used for PM), then it will wind up changing *early*
+	// if you're not careful.
+	tenth_dp = (disp_buf[DIGIT_100_MSEC] & MASK_DP) != 0;
 }
 
 static unsigned char check_buttons() {
@@ -905,7 +912,7 @@ void __ATTR_NORETURN__ main(void) {
 			if (disp_tenth != current_tenth) {
 				// Write the tenth-of-a-second digit, preserving the
 				// decimal point state (just in case)
-				write_reg(MAX_REG_MASK_BOTH | DIGIT_100_MSEC, current_tenth | (disp_buf[DIGIT_100_MSEC] & MASK_DP));
+				write_reg(MAX_REG_MASK_BOTH | DIGIT_100_MSEC, current_tenth | (tenth_dp ? MASK_DP : 0));
 				disp_tenth = current_tenth;
 			}
 		}
