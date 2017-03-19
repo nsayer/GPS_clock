@@ -93,6 +93,16 @@
 #define MASK_AM (MASK_A)
 #define MASK_PM (MASK_D)
 
+// Digit map
+#define DIGIT_10_HR (0)
+#define DIGIT_1_HR (1)
+#define DIGIT_10_MIN (2)
+#define DIGIT_1_MIN (3)
+#define DIGIT_10_SEC (4)
+#define DIGIT_1_SEC (5)
+#define DIGIT_100_MSEC (6)
+#define DIGIT_MISC (7)
+
 #define RX_BUF_LEN (96)
 
 // Port B is the switches and the PPS GPS input
@@ -435,16 +445,16 @@ static void handle_time(char h, unsigned char m, unsigned char s, unsigned char 
 		else if (h > 12) h -= 12;
 	}
 
-	disp_buf[5] = (s % 10) | MASK_DP;
-	disp_buf[4] = s / 10;
-	disp_buf[3] = (m % 10);
-	disp_buf[2] = m / 10;
-	disp_buf[1] = (h % 10);
-	disp_buf[0] = h / 10;
-	disp_buf[6] = disp_buf[7] = 0;
+	disp_buf[DIGIT_1_SEC] = (s % 10) | MASK_DP;
+	disp_buf[DIGIT_10_SEC] = s / 10;
+	disp_buf[DIGIT_1_MIN] = (m % 10);
+	disp_buf[DIGIT_10_MIN] = m / 10;
+	disp_buf[DIGIT_1_HR] = (h % 10);
+	disp_buf[DIGIT_10_HR] = h / 10;
+	disp_buf[DIGIT_100_MSEC] = disp_buf[DIGIT_MISC] = 0;
 	if (ampm) {
 #if 1
-		disp_buf[7] |= am ? MASK_AM : MASK_PM;
+		disp_buf[DIGIT_MISC] |= am ? MASK_AM : MASK_PM;
 #else
 // Early hardware used the digit 6 and 7 DPs for AM/PM.
 		if (am)
@@ -454,7 +464,7 @@ static void handle_time(char h, unsigned char m, unsigned char s, unsigned char 
 #endif
 	}
 	if (colon_state == COLON_ON || colon_state == COLON_BLINK) {
-		disp_buf[7] |= MASK_COLON_HM | MASK_COLON_MS;
+		disp_buf[DIGIT_MISC] |= MASK_COLON_HM | MASK_COLON_MS;
 	}
 }
 
@@ -523,7 +533,7 @@ static void handleGPS() {
 		// $GPGSA,A,3,02,06,12,24,25,29,,,,,,,1.61,1.33,0.90*01
 		ptr = skip_commas(ptr, 2);
 		if (ptr == NULL) return; // not enough commas
-		gps_locked = (*ptr == '3');
+		gps_locked = (*ptr == '3' || *ptr == '2');
 	}
 }
 
@@ -590,13 +600,13 @@ ISR(INT0_vect) {
         unsigned char decode_mask = 0x7f; // assume decoding for all digits
 	// If we are doing 12 digit display and if the 10 hours digit is 0, then blank it instead.
 	// Its value will be zero, so simply disabling the hex decode will result in no segments.
-	if (ampm && disp_buf[0] == 0) {
-		decode_mask &= ~0x1; // No decode for tens-of-hours digit
+	if (ampm && disp_buf[DIGIT_10_HR] == 0) {
+		decode_mask &= ~_BV(DIGIT_10_HR); // No decode for tens-of-hours digit
 	}
 	// If we're not going to show the tenths...
 	if (tenth_ticks == 0) {
-		decode_mask &= ~0x40; // No decode for tenth digit
-		disp_buf[5] &= ~MASK_DP; // no decimal point on seconds digit
+		decode_mask &= ~_BV(DIGIT_100_MSEC); // No decode for tenth digit
+		disp_buf[DIGIT_1_SEC] &= ~MASK_DP; // no decimal point on seconds digit
 	}
 	write_reg(MAX_REG_DEC_MODE, decode_mask);
 
@@ -608,7 +618,7 @@ ISR(INT0_vect) {
 	}
 	if (colon_state == COLON_BLINK) {
 		// If we're blinking, then clear P1's colons out.
-		write_reg(MAX_REG_MASK_P1 | 7, disp_buf[7] & ~(MASK_COLON_HM | MASK_COLON_MS));
+		write_reg(MAX_REG_MASK_P1 | DIGIT_MISC, disp_buf[DIGIT_MISC] & ~(MASK_COLON_HM | MASK_COLON_MS));
 	}
 }
 
@@ -895,7 +905,7 @@ void __ATTR_NORETURN__ main(void) {
 			if (disp_tenth != current_tenth) {
 				// Write the tenth-of-a-second digit, preserving the
 				// decimal point state (just in case)
-				write_reg(MAX_REG_MASK_BOTH | 6, current_tenth | (disp_buf[6] & MASK_DP));
+				write_reg(MAX_REG_MASK_BOTH | DIGIT_100_MSEC, current_tenth | (disp_buf[DIGIT_100_MSEC] & MASK_DP));
 				disp_tenth = current_tenth;
 			}
 		}
