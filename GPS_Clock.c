@@ -21,8 +21,20 @@
 
 // Fuse settings: lfuse=0xe2, hfuse=0xdf, efuse=0xff
 
+// Hardware options:
+// ---
 // V2 hardware has the PPS going into the ICP pin instead of INT0
 #define V2
+
+// !NEW_AMPM hardware has AM on the digit 7 DP and PM on the digit 6 DP
+#define NEW_AMPM
+
+// Older hardware doesn't have a tenth of a second digit
+#define TENTH_DIGIT
+
+// Older hardware doesn't have colons.
+#define COLONS
+// ---
 
 #include <stdlib.h>  
 #include <stdio.h>  
@@ -88,8 +100,10 @@
 #define MASK_G _BV(0)
 
 // Digit 7 has the two colons and the AM & PM lights
+#ifdef COLONS
 #define MASK_COLON_HM (MASK_E | MASK_F)
 #define MASK_COLON_MS (MASK_B | MASK_C)
+#endif
 #define MASK_AM (MASK_A)
 #define MASK_PM (MASK_D)
 
@@ -133,18 +147,24 @@
 #define DST_NZ 4
 #define DST_MODE_MAX DST_NZ
 
+#ifdef COLONS
 #define COLON_OFF 0
 #define COLON_ON 1
 #define COLON_BLINK 2
 #define COLON_STATE_MAX COLON_BLINK
+#endif
 
 // EEPROM locations to store the configuration.
 #define EE_TIMEZONE ((uint8_t*)0)
 #define EE_DST_MODE ((uint8_t*)1)
 #define EE_AM_PM ((uint8_t*)2)
 #define EE_BRIGHTNESS ((uint8_t*)3)
+#ifdef TENTH_DIGIT
 #define EE_TENTHS ((uint8_t*)4)
+#endif
+#ifdef COLONS
 #define EE_COLONS ((uint8_t*)5)
+#endif
 
 // This is the timer frequency - it's the system clock prescaled by 1024
 #define F_TICK (F_CPU / 1024)
@@ -175,10 +195,14 @@ volatile unsigned char dst_mode;
 volatile unsigned char ampm;
 volatile unsigned char menu_pos;
 volatile char tz_hour;
+#ifdef TENTH_DIGIT
 volatile unsigned char tenth_enable;
 volatile unsigned char disp_tenth;
 volatile unsigned char tenth_dp;
+#endif
+#ifdef COLONS
 unsigned char colon_state;
+#endif
 unsigned int debounce_time;
 unsigned char button_down;
 unsigned char brightness;
@@ -446,15 +470,20 @@ static void handle_time(char h, unsigned char m, unsigned char s, unsigned char 
 		else if (h > 12) h -= 12;
 	}
 
-	disp_buf[DIGIT_1_SEC] = (s % 10) | MASK_DP;
+	disp_buf[DIGIT_1_SEC] = (s % 10);
 	disp_buf[DIGIT_10_SEC] = s / 10;
 	disp_buf[DIGIT_1_MIN] = (m % 10);
 	disp_buf[DIGIT_10_MIN] = m / 10;
 	disp_buf[DIGIT_1_HR] = (h % 10);
 	disp_buf[DIGIT_10_HR] = h / 10;
 	disp_buf[DIGIT_100_MSEC] = disp_buf[DIGIT_MISC] = 0;
+#ifndef COLONS
+	// If we don't have colons, add decimal points as separators
+	disp_buf[DIGIT_1_HR] |= MASK_DP;
+	disp_buf[DIGIT_1_MIN] |= MASK_DP;
+#endif
 	if (ampm) {
-#if 1
+#ifdef NEW_AMPM
 		disp_buf[DIGIT_MISC] |= am ? MASK_AM : MASK_PM;
 #else
 // Early hardware used the digit 6 and 7 DPs for AM/PM.
@@ -464,9 +493,11 @@ static void handle_time(char h, unsigned char m, unsigned char s, unsigned char 
 			disp_buf[DIGIT_100_MSEC] |= MASK_DP;
 #endif
 	}
+#ifdef COLONS
 	if (colon_state == COLON_ON || colon_state == COLON_BLINK) {
 		disp_buf[DIGIT_MISC] |= MASK_COLON_HM | MASK_COLON_MS;
 	}
+#endif
 }
 
 static const char *skip_commas(const char *ptr, const int num) {
@@ -569,14 +600,13 @@ static void write_no_sig() {
 
 #ifdef V2
 ISR(TIMER1_CAPT_vect) {
-#else
-ISR(INT0_vect) {
-#endif
-#ifdef V2
 	unsigned int this_tick = ICR1;
 #else
+ISR(INT0_vect) {
 	unsigned int this_tick = TCNT1;
 #endif
+
+#ifdef TENTH_DIGIT
 	if (menu_pos == 0 && tenth_enable && last_pps_tick != 0) {
 		tenth_ticks = (this_tick - last_pps_tick) / 10;
 		// For unknown reasons we seemingly sometimes get spurious
@@ -587,6 +617,7 @@ ISR(INT0_vect) {
 	} else {
 		tenth_ticks = 0;
 	}
+#endif
 	last_pps_tick = this_tick;
 	if (last_pps_tick == 0) last_pps_tick++; // it can never be zero
 
@@ -599,34 +630,42 @@ ISR(INT0_vect) {
 	// Hit the T bit so that the blink counter is cleared
 	write_reg(MAX_REG_CONFIG, MAX_REG_CONFIG_B | MAX_REG_CONFIG_S | MAX_REG_CONFIG_E | MAX_REG_CONFIG_T);
         unsigned char decode_mask = 0x7f; // assume decoding for all digits
-	// If we are doing 12 digit display and if the 10 hours digit is 0, then blank it instead.
+	// If we are doing 12 hour display and if the 10 hours digit is 0, then blank it instead.
 	// Its value will be zero, so simply disabling the hex decode will result in no segments.
 	if (ampm && disp_buf[DIGIT_10_HR] == 0) {
 		decode_mask &= ~_BV(DIGIT_10_HR); // No decode for tens-of-hours digit
 	}
+#ifdef TENTH_DIGIT
 	// If we're not going to show the tenths...
 	if (tenth_ticks == 0) {
 		decode_mask &= ~_BV(DIGIT_100_MSEC); // No decode for tenth digit
-		disp_buf[DIGIT_1_SEC] &= ~MASK_DP; // no decimal point on seconds digit
+	} else {
+		disp_buf[DIGIT_1_SEC] |= MASK_DP; // add a decimal point on seconds digit
 	}
-	write_reg(MAX_REG_DEC_MODE, decode_mask);
 
 	disp_tenth = 0; // right now, 0 is showing.
 
-	// Copy the display buffer data into the display
-	for(int i = 0; i < sizeof(disp_buf); i++) {
-		write_reg(MAX_REG_MASK_BOTH | i, disp_buf[i]);
-	}
-	if (colon_state == COLON_BLINK) {
-		// If we're blinking, then clear P1's colons out.
-		write_reg(MAX_REG_MASK_P1 | DIGIT_MISC, disp_buf[DIGIT_MISC] & ~(MASK_COLON_HM | MASK_COLON_MS));
-	}
 	// Watch out, there's an old bug lurking here. disp_buf[] gets
 	// updated with data for the *next* second early on during *this*
 	// second. If the tenth DP is ever used for anything time related,
 	// (it used to be used for PM), then it will wind up changing *early*
 	// if you're not careful.
 	tenth_dp = (disp_buf[DIGIT_100_MSEC] & MASK_DP) != 0;
+#else
+	decode_mask &= ~_BV(DIGIT_100_MSEC); // No decode for tenth digit
+#endif
+	write_reg(MAX_REG_DEC_MODE, decode_mask);
+
+	// Copy the display buffer data into the display
+	for(int i = 0; i < sizeof(disp_buf); i++) {
+		write_reg(MAX_REG_MASK_BOTH | i, disp_buf[i]);
+	}
+#ifdef COLONS
+	if (colon_state == COLON_BLINK) {
+		// If we're blinking, then clear P1's colons out.
+		write_reg(MAX_REG_MASK_P1 | DIGIT_MISC, disp_buf[DIGIT_MISC] & ~(MASK_COLON_HM | MASK_COLON_MS));
+	}
+#endif
 }
 
 static unsigned char check_buttons() {
@@ -717,6 +756,7 @@ static void menu_render() {
         		write_reg(MAX_REG_MASK_BOTH | 5, MASK_E | MASK_G); // r
 			break;
 		case 4: // tenths enabled
+#ifdef TENTH_DIGIT
 			write_reg(MAX_REG_DEC_MODE, 3); // decode only first two digits
         		write_reg(MAX_REG_MASK_BOTH | 0, 1);
         		write_reg(MAX_REG_MASK_BOTH | 1, 0);
@@ -729,7 +769,12 @@ static void menu_render() {
 				write_reg(MAX_REG_MASK_BOTH | 5, MASK_A | MASK_E | MASK_F | MASK_G); // F
 			}
 			break;
+#else
+			menu_pos++;
+			// fall through
+#endif
 		case 5: // colons enabled
+#ifdef COLONS
 			write_reg(MAX_REG_DEC_MODE, 0); // decode only first two digits
         		write_reg(MAX_REG_MASK_BOTH | 0, MASK_A | MASK_D | MASK_E | MASK_F); // C
         		write_reg(MAX_REG_MASK_BOTH | 1, MASK_C | MASK_D | MASK_E | MASK_G); // o
@@ -748,6 +793,10 @@ static void menu_render() {
 					break;
 			}
 			break;
+#else
+			menu_pos++;
+			// fall through
+#endif
 		case 6: // brightness
 			write_reg(MAX_REG_DEC_MODE, 0); // no decoding
         		write_reg(MAX_REG_MASK_BOTH | 0, MASK_C | MASK_D | MASK_E | MASK_F | MASK_G); // b
@@ -775,12 +824,16 @@ static void menu_set() {
 		case 3:
 			eeprom_write_byte(EE_AM_PM, ampm);
 			break;
+#ifdef TENTH_DIGIT
 		case 4:
 			eeprom_write_byte(EE_TENTHS, tenth_enable);
 			break;
+#endif
+#ifdef COLONS
 		case 5:
 			eeprom_write_byte(EE_COLONS, colon_state);
 			break;
+#endif
 		case 6:
 			eeprom_write_byte(EE_BRIGHTNESS, brightness);
 			break;
@@ -801,12 +854,16 @@ static void menu_select() {
 		case 3: // 12/24 hour
 			ampm = !ampm;
 			break;
+#ifdef TENTH_DIGIT
 		case 4: // tenths enabled
 			tenth_enable = !tenth_enable;
 			break;
+#endif
+#ifdef COLONS
 		case 5: // colons
 			if (++colon_state > COLON_STATE_MAX) colon_state = 0;
 			break;
+#endif
 		case 6: // brightness
 			if (++brightness > 15) brightness = 0;
 			break;
@@ -870,8 +927,10 @@ void __ATTR_NORETURN__ main(void) {
 	debounce_time = 0;
 	button_down = 0;
 	last_pps_tick = 0;
+#ifdef TENTH_DIGIT
 	tenth_ticks = 0;
 	disp_tenth = 0;
+#endif
 
 	// Turn off the shut-down register, clear the digit data
 	write_reg(MAX_REG_CONFIG, MAX_REG_CONFIG_R | MAX_REG_CONFIG_B | MAX_REG_CONFIG_S | MAX_REG_CONFIG_E);
@@ -879,9 +938,13 @@ void __ATTR_NORETURN__ main(void) {
 	brightness = eeprom_read_byte(EE_BRIGHTNESS) & 0xf;
 	write_reg(MAX_REG_INTENSITY, brightness);
 
+#ifdef TENTH_DIGIT
 	tenth_enable = eeprom_read_byte(EE_TENTHS) != 0;
+#endif
+#ifdef COLONS
         colon_state = eeprom_read_byte(EE_COLONS);
 	if (colon_state > COLON_STATE_MAX) colon_state = 1; // default to just on.
+#endif
 
 	// Turn on the self-test for a second
 	write_reg(MAX_REG_TEST, 1);
@@ -906,6 +969,7 @@ void __ATTR_NORETURN__ main(void) {
 			last_pps_tick = 0;
 			continue;
 		}
+#ifdef TENTH_DIGIT
 		if (tenth_ticks != 0) {
 			unsigned int current_tick = tcnt1 - local_lpt;
 			unsigned int current_tenth = (current_tick / tenth_ticks) % 10;
@@ -916,6 +980,7 @@ void __ATTR_NORETURN__ main(void) {
 				disp_tenth = current_tenth;
 			}
 		}
+#endif
 		unsigned char button = check_buttons();
 		if (!button) continue;
 
