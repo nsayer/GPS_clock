@@ -246,46 +246,21 @@ void write_reg(const unsigned char addr, const unsigned char val) {
 	}
 }
 
-// zero-based day of year number for first day of each month, non-leap-year
-const unsigned int first_day[] PROGMEM = {0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334 };
+const unsigned char month_tweak[] PROGMEM = {0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4 };
 
-// Note that this routine is only defined for years between 2000 and 2099.
-// If you're alive beyond that, then this is a Y2.1K bug for you to fix.
-// You also get to figure out what to do about the NMEA two-digit
-// year format. And probably update the GPS firmware or buy a new module.
-static unsigned char first_sunday(const unsigned char m, const unsigned char y) {
-	unsigned int day_of_year = 0;
-	// after March, leap year comes into play
-	if (m > 2) {
-		// Y2.1K bug here. Every 100 years is not a leap year,
-		// but every 400 years is again.
-		if ((y % 4) == 0) day_of_year++;
-	}
-	// Now add in the offset for the month.
-	day_of_year += pgm_read_dword(&(first_day[m - 1]));
-	// This requires some explanation. We need to calculate the weekday of January 1st.
-	// This all works because Y2K was a leap year and because we're doing all
-	// of this for years *after* 2000.
-	//
-	// January 1st 2000 was a Saturday. Since we're 0 based and starting with Sunday...
-	unsigned char weekday = 6;
-	// For every year after 2000, add one day, since normal years advance the weekday by 1.
-	weekday += y % 7;
-	weekday %= 7;
-	// For every leap year after 2000, add another day, since leap years advance the weekday by 2.
-	// But you only do it for leap years *in the past*. Note that this won't work for 2000 because
-	// of underflow.
-	weekday += (((y - 1) / 4) + 1) % 7;
-	weekday %= 7;
-	// Y2.1K bug - this is where you're supposed to take a day *away*
-	// every 100 years... but then add it *back* every 400.
-	// Add in the day of the year
-	weekday += day_of_year % 7;
-	weekday %= 7;
-	// Now figure out how many days before we hit a Sunday. But if we're already there, then just return 1.
-	return (weekday == 0)?1:(8 - weekday);
+static unsigned char first_sunday(unsigned char m, unsigned int y) {
+	// first, what's the day-of-week for the first day of whatever month?
+	// From http://en.wikipedia.org/wiki/Determination_of_the_day_of_the_week
+	y -= m < 3;
+	unsigned char month_tweak_val = pgm_read_byte(&(month_tweak[m - 1]));
+	unsigned char dow = (y + y/4 - y/100 + y/400 + month_tweak_val + 1) % 7;
+
+	// If the 1st is a Sunday, then the answer is 1. Otherwise, we count
+	// up until we find a Sunday.
+	return (dow == 0)?1:(8 - dow);
 }
-static unsigned char calculateDSTAU(const unsigned char d, const unsigned char m, const unsigned char y) {
+
+static unsigned char calculateDSTAU(const unsigned char d, const unsigned char m, const unsigned int y) {
         // DST is in effect between the first Sunday in October and the first Sunday in April
         unsigned char change_day;
         switch(m) {
@@ -317,7 +292,7 @@ static unsigned char calculateDSTAU(const unsigned char d, const unsigned char m
                         return 255;
         }
 }
-static unsigned char calculateDSTNZ(const unsigned char d, const unsigned char m, const unsigned char y) {
+static unsigned char calculateDSTNZ(const unsigned char d, const unsigned char m, const unsigned int y) {
         // DST is in effect between the last Sunday in September and the first Sunday in April
         unsigned char change_day;
         switch(m) {
@@ -341,7 +316,7 @@ static unsigned char calculateDSTNZ(const unsigned char d, const unsigned char m
                         return DST_NO;
                 case 9: // September
                         change_day = first_sunday(m, y);
-                        while(change_day + 7 < 30) change_day += 7; // last Sunday
+                        while(change_day + 7 <= 30) change_day += 7; // last Sunday
                         if (d < change_day) return DST_NO;
                         else if (d == change_day) return DST_BEGINS;
                         else return DST_YES;
@@ -350,7 +325,7 @@ static unsigned char calculateDSTNZ(const unsigned char d, const unsigned char m
                         return 255;
         }
 }
-static unsigned char calculateDSTEU(const unsigned char d, const unsigned char m, const unsigned char y) {
+static unsigned char calculateDSTEU(const unsigned char d, const unsigned char m, const unsigned int y) {
         // DST is in effect between the last Sunday in March and the last Sunday in October
         unsigned char change_day;
         switch(m) {
@@ -361,7 +336,7 @@ static unsigned char calculateDSTEU(const unsigned char d, const unsigned char m
                         return DST_NO;
                 case 3: // March
                         change_day = first_sunday(m, y);
-                        while(change_day + 7 < 31) change_day += 7; // last Sunday
+                        while(change_day + 7 <= 31) change_day += 7; // last Sunday
                         if (d < change_day) return DST_NO;
                         else if (d == change_day) return DST_BEGINS;
                         else return DST_YES;
@@ -375,7 +350,7 @@ static unsigned char calculateDSTEU(const unsigned char d, const unsigned char m
                         return DST_YES;
                 case 10: // October
                         change_day = first_sunday(m, y);
-                        while(change_day + 7 < 30) change_day += 7; // last Sunday
+                        while(change_day + 7 <= 31) change_day += 7; // last Sunday
                         if (d < change_day) return DST_YES;
                         else if (d == change_day) return DST_ENDS;
                         else return DST_NO;
@@ -384,7 +359,7 @@ static unsigned char calculateDSTEU(const unsigned char d, const unsigned char m
                         return 255;
         }
 }
-static unsigned char calculateDSTUS(const unsigned char d, const unsigned char m, const unsigned char y) {
+static unsigned char calculateDSTUS(const unsigned char d, const unsigned char m, const unsigned int y) {
 	// DST is in effect between the 2nd Sunday in March and the first Sunday in November
 	// The return values here are that DST is in effect, or it isn't, or it's beginning
 	// for the year today or it's ending today.
@@ -418,7 +393,7 @@ static unsigned char calculateDSTUS(const unsigned char d, const unsigned char m
 			return 255;
 	}
 }
-static unsigned char calculateDST(const unsigned char d, const unsigned char m, const unsigned char y) {
+static unsigned char calculateDST(const unsigned char d, const unsigned char m, const unsigned int y) {
         switch(dst_mode) {
                 case DST_US:
                         return calculateDSTUS(d, m, y);
@@ -551,7 +526,16 @@ static void handleGPS() {
 		if (ptr == NULL) return; // not enough commas
 		unsigned char d = (ptr[0] - '0') * 10 + (ptr[1] - '0');
 		unsigned char mon = (ptr[2] - '0') * 10 + (ptr[3] - '0');
-		unsigned char y = (ptr[4] - '0') * 10 + (ptr[5] - '0');
+		unsigned int y = (ptr[4] - '0') * 10 + (ptr[5] - '0');
+
+		// Y2.1K bug here... We must turn the two digit year into
+		// the actual A.D. year number. As time goes forward, in
+		// principle, we could start deciding that "low" values
+		// get 2100 added instead of 2000. You'd think that
+		// way before then GPS will be obsolete, though.
+		y += 2000;
+		if (y < 2017) y += 100; // As I type this, it's A.D. 2017
+
 		// The problem is that our D/M/Y is UTC, but DST decisions are made in the local
 		// timezone. We can adjust the day against standard time midnight, and
 		// that will be good enough. Don't worry that this can result in d being either 0
@@ -629,7 +613,7 @@ ISR(INT0_vect) {
 
 	// Hit the T bit so that the blink counter is cleared
 	write_reg(MAX_REG_CONFIG, MAX_REG_CONFIG_B | MAX_REG_CONFIG_S | MAX_REG_CONFIG_E | MAX_REG_CONFIG_T);
-        unsigned char decode_mask = 0x7f; // assume decoding for all digits
+        unsigned char decode_mask = (unsigned char)~_BV(DIGIT_MISC); // assume decoding for all digits
 	// If we are doing 12 hour display and if the 10 hours digit is 0, then blank it instead.
 	// Its value will be zero, so simply disabling the hex decode will result in no segments.
 	if (ampm && disp_buf[DIGIT_10_HR] == 0) {
