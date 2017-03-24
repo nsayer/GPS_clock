@@ -425,13 +425,20 @@ static void handle_time(char h, unsigned char m, unsigned char s, unsigned char 
 
 	if (dst_mode != DST_OFF) {
 		unsigned char dst_offset = 0;
+		// For Europe, decisions are at 0100. Everywhere else it's 0200.
+		unsigned char decision_hour = (dst_mode == DST_EU)?1:2;
 		switch(dst_flags) {
 			case DST_NO: dst_offset = 0; break; // do nothing
 			case DST_YES: dst_offset = 1; break; // add one hour
 			case DST_BEGINS:
-				dst_offset = (h >= (dst_mode == DST_EU?1:2))?1:0; break; // offset becomes 1 at 0200 (0100 EU)
+				dst_offset = (h >= decision_hour)?1:0; // offset becomes 1 at 0200 (0100 EU)
+				break;
                         case DST_ENDS:
-                                dst_offset = (h >= (dst_mode == DST_EU?0:1))?0:1; break; // offset becomes 0 at 0200 (post-correction) (0100 EU)
+				// The *summer time* hour has to be the decision hour,
+				// and we haven't yet made 'h' the summer time hour,
+				// so compare it to one less than the decision hour.
+                                dst_offset = (h >= (decision_hour - 1))?0:1; // offset becomes 0 at 0200 (daylight) (0100 EU)
+				break;
 		}
 		h += dst_offset;
 		if (h >= 24) h -= 24;
@@ -521,7 +528,6 @@ static void handleGPS() {
 		char h = (ptr[0] - '0') * 10 + (ptr[1] - '0');
 		unsigned char min = (ptr[2] - '0') * 10 + (ptr[3] - '0');
 		unsigned char s = (ptr[4] - '0') * 10 + (ptr[5] - '0');
-		unsigned char dst_flags = 0;
 		ptr = skip_commas(ptr, 8);
 		if (ptr == NULL) return; // not enough commas
 		unsigned char d = (ptr[0] - '0') * 10 + (ptr[1] - '0');
@@ -543,7 +549,7 @@ static void handleGPS() {
 		// for DST, which is the only day on which the day of the month is significant.
 		if (h + tz_hour < 0) d--;
 		if (h + tz_hour > 23) d++;
-		dst_flags = calculateDST(d, mon, y);
+		unsigned char dst_flags = calculateDST(d, mon, y);
 		handle_time(h, min, s, dst_flags);
 	} else if (!strncmp_P(ptr, PSTR("$GPGSA"), 6)) {
 		// $GPGSA,A,3,02,06,12,24,25,29,,,,,,,1.61,1.33,0.90*01
@@ -739,8 +745,8 @@ static void menu_render() {
         		write_reg(MAX_REG_MASK_BOTH | 4, MASK_C | MASK_E | MASK_F | MASK_G); // h
         		write_reg(MAX_REG_MASK_BOTH | 5, MASK_E | MASK_G); // r
 			break;
-		case 4: // tenths enabled
 #ifdef TENTH_DIGIT
+		case 4: // tenths enabled
 			write_reg(MAX_REG_DEC_MODE, 3); // decode only first two digits
         		write_reg(MAX_REG_MASK_BOTH | 0, 1);
         		write_reg(MAX_REG_MASK_BOTH | 1, 0);
@@ -753,12 +759,9 @@ static void menu_render() {
 				write_reg(MAX_REG_MASK_BOTH | 5, MASK_A | MASK_E | MASK_F | MASK_G); // F
 			}
 			break;
-#else
-			menu_pos++;
-			// fall through
 #endif
-		case 5: // colons enabled
 #ifdef COLONS
+		case 5: // colons enabled
 			write_reg(MAX_REG_DEC_MODE, 0); // decode only first two digits
         		write_reg(MAX_REG_MASK_BOTH | 0, MASK_A | MASK_D | MASK_E | MASK_F); // C
         		write_reg(MAX_REG_MASK_BOTH | 1, MASK_C | MASK_D | MASK_E | MASK_G); // o
@@ -777,9 +780,6 @@ static void menu_render() {
 					break;
 			}
 			break;
-#else
-			menu_pos++;
-			// fall through
 #endif
 		case 6: // brightness
 			write_reg(MAX_REG_DEC_MODE, 0); // no decoding
@@ -797,6 +797,7 @@ static void menu_render() {
 static void menu_set() {
 	switch(menu_pos) {
 		case 0:
+			// we're entering the menu system. Disable the tenth digit.
 			tenth_ticks = 0;
 			break;
 		case 1:
@@ -823,6 +824,14 @@ static void menu_set() {
 			break;
 	}
 	if (++menu_pos > 6) menu_pos = 0;
+#ifndef TENTH_DIGIT
+	// There is no tenth digit menu. Skip past it.
+	if (menu_pos == 4) menu_pos++;
+#endif
+#ifndef COLONS
+	// There is no colon menu. Skip past it.
+	if (menu_pos == 5) menu_pos++;
+#endif
 	menu_render();
 }
 
