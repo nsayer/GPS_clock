@@ -476,7 +476,7 @@ static void handle_time(char h, unsigned char m, unsigned char s, unsigned char 
 #endif
 	}
 #ifdef COLONS
-	if (colon_state == COLON_ON || colon_state == COLON_BLINK) {
+	if (colon_state == COLON_ON || ((colon_state == COLON_BLINK) && (s % 2 == 0))) {
 		disp_buf[DIGIT_MISC] |= MASK_COLON_HM | MASK_COLON_MS;
 	}
 #endif
@@ -650,12 +650,6 @@ ISR(INT0_vect) {
 	for(int i = 0; i < sizeof(disp_buf); i++) {
 		write_reg(MAX_REG_MASK_BOTH | i, disp_buf[i]);
 	}
-#ifdef COLONS
-	if (colon_state == COLON_BLINK) {
-		// If we're blinking, then clear P1's colons out.
-		write_reg(MAX_REG_MASK_P1 | DIGIT_MISC, disp_buf[DIGIT_MISC] & ~(MASK_COLON_HM | MASK_COLON_MS));
-	}
-#endif
 }
 
 static unsigned char check_buttons() {
@@ -775,7 +769,7 @@ static void menu_render() {
 				case COLON_ON: // on solid
 					write_reg(MAX_REG_MASK_BOTH | 7, MASK_COLON_HM | MASK_COLON_MS);
 					break;
-				case COLON_BLINK: // blink - write to only P0
+				case COLON_BLINK: // blink - write to only P0. We don't actually blink the clock this way, though.
 					write_reg(MAX_REG_MASK_P0 | 7, MASK_COLON_HM | MASK_COLON_MS);
 					break;
 			}
