@@ -63,7 +63,7 @@
 #define BIT_MAX_CS _BV(PORTA3)
 #define BIT_MAX_CLK _BV(PORTA4)
 #define BIT_MAX_DO _BV(PORTA6)
-#define DDR_BITS_A _BV(DDRA3) | _BV(DDRA4) | _BV(DDRA6)
+#define DDR_BITS_A _BV(DDA3) | _BV(DDA4) | _BV(DDA6)
 
 // The MAX6951 registers and their bits
 #define MAX_REG_DEC_MODE 0x01
@@ -219,30 +219,36 @@ static void Delay(unsigned long ms) {
 }
 
 void write_reg(const unsigned char addr, const unsigned char val) {
-	// We write a 16 bit word, with address at the top end.
-	unsigned int data = (addr << 8) | val;
-
-	// ISRs can perform writes, so the whole thing has to be atomic.
-	// A collision is unlikely, but it would be messy.
 	ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
-		// Start with clk low
-		PORT_MAX &= ~BIT_MAX_CLK;
+		// We have to make !SS an output for the duration of SPI master mode.
+		// If it's an input and becomes low, the SPI controller get screwed up.
+		// Trouble is, it's connected to another device (the GPS module) that's
+		// actively sending a signal. So to avoid making a short circuit, we
+		// copy the current input state to the output port and just hope that
+		// the signal doesn't change for the duration of the SPI transaction.
+		if (PINA & _BV(PINA7)) {
+			PORTA |= _BV(PORTA7);
+		} else {
+			PORTA &= ~_BV(PORTA7);
+		}
+		DDRA |= _BV(DDA7); // Make !SS an output
+		SPCR = _BV(SPE) | _BV(MSTR); // And turn on SPI
+
 		// Now assert !CS
 		PORT_MAX &= ~BIT_MAX_CS;
-		// now clock each data bit in
-		for(unsigned int mask = 1 << 15; mask != 0; mask >>= 1) {
-			// Set the data bit to the appropriate data bit value
-			if (data & mask)
-				PORT_MAX |= BIT_MAX_DO;
-			else
-				PORT_MAX &= ~BIT_MAX_DO;
-			// Toggle the clock. The maximum clock frequency is something
-			// like 50 MHz, so there's no need to add any delays.
-			PORT_MAX |= BIT_MAX_CLK;
-			PORT_MAX &= ~BIT_MAX_CLK;
-		}
+
+		SPDR = addr;
+		while(!(SPSR & _BV(SPIF))) ;
+
+		SPDR = val;
+		while(!(SPSR & _BV(SPIF))) ;
+
 		// And finally, release !CS.
 		PORT_MAX |= BIT_MAX_CS;
+
+		SPCR = 0; // Turn off SPI
+		DDRA &= ~_BV(DDA7); // and revert the !SS pin back to an input.
+		PORTA &= ~_BV(PORTA7); // set the port bit to 0 to disable the pull-up.
 	}
 }
 
@@ -864,7 +870,7 @@ void __ATTR_NORETURN__ main(void) {
 	wdt_enable(WDTO_1S);
 
 	// We don't use a lot of the chip, it turns out
-	PRR = ~(_BV(PRUSART0) | _BV(PRTIM1));
+	PRR = ~(_BV(PRSPI) | _BV(PRUSART0) | _BV(PRTIM1));
 
 	// Make sure the CS pin is high and everything else is low.
 	PORT_MAX = BIT_MAX_CS;
@@ -899,6 +905,11 @@ void __ATTR_NORETURN__ main(void) {
 #else
 	TCCR1B = _BV(CS12) | _BV(CS10); // prescale by 1024
 #endif
+
+	// No, we can't do this here. We can only turn on SPI
+	// while PA7 is an output.
+	//SPCR = _BV(SPE) | _BV(MSTR);
+	SPSR = _BV(SPI2X);
 
 	unsigned char ee_rd = eeprom_read_byte(EE_TIMEZONE);
 	if (ee_rd == 0xff)
