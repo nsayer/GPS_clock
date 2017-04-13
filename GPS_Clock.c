@@ -26,6 +26,9 @@
 // V2 hardware has the PPS going into the ICP pin instead of INT0
 #define V2
 
+// V3 has the PPS line going into ICP2 instead of ICP1 so !SS can be !D_CS
+//#define V3
+
 // !NEW_AMPM hardware has AM on the digit 7 DP and PM on the digit 6 DP
 #define NEW_AMPM
 
@@ -35,6 +38,10 @@
 // Older hardware doesn't have colons.
 #define COLONS
 // ---
+
+#if (defined(V3) && !defined(V2))
+#error V3 requires V2
+#endif
 
 #include <stdlib.h>  
 #include <stdio.h>  
@@ -60,10 +67,18 @@
 // We don't need to config the serial pins - it's enough to
 // just turn on the USART.
 #define PORT_MAX PORTA
+#ifdef V3
+#define BIT_MAX_CS _BV(PORTA7)
+#else
 #define BIT_MAX_CS _BV(PORTA3)
-#define BIT_MAX_CLK _BV(PORTA4)
-#define BIT_MAX_DO _BV(PORTA6)
+#endif
+// MOSI and SCK are taken care of by the SPI stuff, but must still
+// have the DDR bits set to make them outputs.
+#ifdef V3
+#define DDR_BITS_A _BV(DDA7) | _BV(DDA4) | _BV(DDA6)
+#else
 #define DDR_BITS_A _BV(DDA3) | _BV(DDA4) | _BV(DDA6)
+#endif
 
 // The MAX6951 registers and their bits
 #define MAX_REG_DEC_MODE 0x01
@@ -123,11 +138,19 @@
 #define PORT_SW PINB
 #define DDR_BITS_B (0)
 #define SW_0_BIT _BV(PINB0)
+#ifdef V3
+#define SW_1_BIT _BV(PINB1)
+#else
 #define SW_1_BIT _BV(PINB2)
+#endif
 // Note that some versions of the AVR LIBC forgot to
 // define the individual PUExn bit numbers. If you have
 // a version like this, then just use _BV(0) | _BV(2).
+#ifdef V3
+#define PULLUP_BITS_B _BV(PUEB0) | _BV(PUEB1)
+#else
 #define PULLUP_BITS_B _BV(PUEB0) | _BV(PUEB2)
+#endif
 
 // These are return values from the DST detector routine.
 // DST is not in effect all day
@@ -166,8 +189,8 @@
 #define EE_COLONS ((uint8_t*)5)
 #endif
 
-// This is the timer frequency - it's the system clock prescaled by 1024
-#define F_TICK (F_CPU / 1024)
+// This is the timer frequency - it's the system clock prescaled by 8
+#define F_TICK (F_CPU / 8)
 
 // We want something like 50 ms.
 #define DEBOUNCE_TICKS (F_TICK / 20)
@@ -188,13 +211,14 @@
 volatile unsigned char disp_buf[8];
 volatile unsigned char rx_buf[RX_BUF_LEN];
 volatile unsigned char rx_str_len;
-volatile unsigned int last_pps_tick;
-volatile unsigned int tenth_ticks;
+volatile unsigned long last_pps_tick;
+volatile unsigned long tenth_ticks;
 volatile unsigned char gps_locked;
 volatile unsigned char dst_mode;
 volatile unsigned char ampm;
 volatile unsigned char menu_pos;
 volatile char tz_hour;
+volatile unsigned int timer_hibits;
 #ifdef TENTH_DIGIT
 volatile unsigned char tenth_enable;
 volatile unsigned char disp_tenth;
@@ -203,7 +227,7 @@ volatile unsigned char tenth_dp;
 #ifdef COLONS
 unsigned char colon_state;
 #endif
-unsigned int debounce_time;
+unsigned long debounce_time;
 unsigned char button_down;
 unsigned char brightness;
 
@@ -220,6 +244,7 @@ static void Delay(unsigned long ms) {
 
 void write_reg(const unsigned char addr, const unsigned char val) {
 	ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
+#ifndef V3
 		// We have to make !SS an output for the duration of SPI master mode.
 		// If it's an input and becomes low, the SPI controller get screwed up.
 		// Trouble is, it's connected to another device (the GPS module) that's
@@ -233,6 +258,7 @@ void write_reg(const unsigned char addr, const unsigned char val) {
 		}
 		DDRA |= _BV(DDA7); // Make !SS an output
 		SPCR = _BV(SPE) | _BV(MSTR); // And turn on SPI
+#endif
 
 		// Now assert !CS
 		PORT_MAX &= ~BIT_MAX_CS;
@@ -246,9 +272,11 @@ void write_reg(const unsigned char addr, const unsigned char val) {
 		// And finally, release !CS.
 		PORT_MAX |= BIT_MAX_CS;
 
+#ifndef V3
 		SPCR = 0; // Turn off SPI
 		DDRA &= ~_BV(DDA7); // and revert the !SS pin back to an input.
-		PORTA &= ~_BV(PORTA7); // set the port bit to 0 to disable the pull-up.
+		//PORTA &= ~_BV(PORTA7); // This doesn't really matter. Pull-ups are via PUEx.
+#endif
 	}
 }
 
@@ -594,12 +622,50 @@ static void write_no_sig() {
         write_reg(MAX_REG_MASK_BOTH | 5, MASK_A | MASK_C | MASK_D | MASK_F | MASK_G); // S
 }
 
+static unsigned long timer_value() {
+	unsigned long now;
+	ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
+#ifdef V3
+		now = (((unsigned long)timer_hibits) << 16) | TCNT2;
+#else
+		now = (((unsigned long)timer_hibits) << 16) | TCNT1;
+#endif
+	}
+	return now;
+}
+
+#ifdef V3
+ISR(TIMER2_OVF_vect) {
+#else
+ISR(TIMER1_OVF_vect) {
+#endif
+	timer_hibits++;
+}
+
 #ifdef V2
+#ifdef V3
+ISR(TIMER2_CAPT_vect) {
+	unsigned long this_tick = (((unsigned long)timer_hibits) << 16) | ICR2;
+#else
 ISR(TIMER1_CAPT_vect) {
-	unsigned int this_tick = ICR1;
+	unsigned long this_tick = (((unsigned long)timer_hibits) << 16) | ICR1;
+#endif
 #else
 ISR(INT0_vect) {
-	unsigned int this_tick = TCNT1;
+	unsigned long this_tick = (((unsigned long)timer_hibits) << 16) | TCNT1;
+#endif
+
+	// Sometimes the overflow and capture interrupts collide. When this happens,
+	// it means that the hibits value is 1 too low. We can detect this by
+	// checking if the low bits are "close" to zero and if the overflow interrupt
+	// is pending. If that's true, then we can compensate locally for the missing
+	// interrupt (and it will happen when we return anyway). If the low bits are high,
+	// then the interrupt is pending because it came (shortly) after we sampled, so
+	// we don't compensate. "close" can simply be testing the MSB for 0.
+#ifdef V3
+	if ((TIFR2 & TOV2) && !(this_tick & 0x8000)) this_tick += 0x10000L;
+#else
+	if ((TIFR1 & TOV1) && !(this_tick & 0x8000)) this_tick += 0x10000L;
 #endif
 
 #ifdef TENTH_DIGIT
@@ -623,8 +689,6 @@ ISR(INT0_vect) {
 		return;
 	}
 
-	// Hit the T bit so that the blink counter is cleared
-	write_reg(MAX_REG_CONFIG, MAX_REG_CONFIG_B | MAX_REG_CONFIG_S | MAX_REG_CONFIG_E | MAX_REG_CONFIG_T);
         unsigned char decode_mask = (unsigned char)~_BV(DIGIT_MISC); // assume decoding for all digits
 	// If we are doing 12 hour display and if the 10 hours digit is 0, then blank it instead.
 	// Its value will be zero, so simply disabling the hex decode will result in no segments.
@@ -652,19 +716,16 @@ ISR(INT0_vect) {
 #endif
 	write_reg(MAX_REG_DEC_MODE, decode_mask);
 
-	// Copy the display buffer data into the display
-	for(int i = 0; i < sizeof(disp_buf); i++) {
+	// Copy the display buffer data into the display, but do the least
+	// significant digits first, for great justice.
+	for(int i = sizeof(disp_buf) - 1; i >= 0; i--) {
 		write_reg(MAX_REG_MASK_BOTH | i, disp_buf[i]);
 	}
 }
 
 static unsigned char check_buttons() {
-	// TCNT1 is a 16 bit register - it must be read atomically.
-	unsigned int tcnt1;
-	ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
-		tcnt1 = TCNT1;
-	}
-	if (debounce_time != 0 && tcnt1 - debounce_time < DEBOUNCE_TICKS) {
+	unsigned long now = timer_value();
+	if (debounce_time != 0 && now - debounce_time < DEBOUNCE_TICKS) {
 		// We don't pay any attention to the buttons during debounce time.
 		return 0;
 	} else {
@@ -675,7 +736,7 @@ static unsigned char check_buttons() {
 	if (!((button_down == 0) ^ (status == 0))) return 0; // either no button is down, or a button is still down
 
 	// Something *changed*, which means we must now start a debounce interval.
-	debounce_time = tcnt1;
+	debounce_time = now;
 	if (!debounce_time) debounce_time++; // it's not allowed to be zero
 
 	if (!button_down && status) {
@@ -869,8 +930,12 @@ void __ATTR_NORETURN__ main(void) {
 
 	wdt_enable(WDTO_1S);
 
-	// We don't use a lot of the chip, it turns out
+	// Leave on only the parts of the chip we use.
+#ifdef V3
+	PRR = ~(_BV(PRSPI) | _BV(PRUSART0) | _BV(PRTIM2));
+#else
 	PRR = ~(_BV(PRSPI) | _BV(PRUSART0) | _BV(PRTIM1));
+#endif
 
 	// Make sure the CS pin is high and everything else is low.
 	PORT_MAX = BIT_MAX_CS;
@@ -900,15 +965,26 @@ void __ATTR_NORETURN__ main(void) {
 	rx_str_len = 0;
 
 #ifdef V2
-	TCCR1B = _BV(ICES1) | _BV(CS12) | _BV(CS10); // prescale by 1024, capture on rising edge
-	TIMSK1 = _BV(ICIE1); // interrupt on capture
+#ifdef V3
+	TCCR2B = _BV(ICES2) | _BV(CS21); // prescale by 8, capture on rising edge
+	TIMSK2 = _BV(TOIE2) | _BV(ICIE2); // interrupt on capture or overflow
 #else
-	TCCR1B = _BV(CS12) | _BV(CS10); // prescale by 1024
+	TCCR1B = _BV(ICES1) | _BV(CS11); // prescale by 8, capture on rising edge
+	TIMSK1 = _BV(TOIE1) | _BV(ICIE1); // interrupt on capture or overflow
+#endif
+#else
+	TCCR1B = _BV(CS11); // prescale by 8
+	TIMSK1 = _BV(TOIE1); // interrupt on overflow
 #endif
 
-	// No, we can't do this here. We can only turn on SPI
+	timer_hibits = 0;
+
+	// For V2, we can't do this here. We can only turn on SPI
 	// while PA7 is an output.
-	//SPCR = _BV(SPE) | _BV(MSTR);
+#ifdef V3
+	SPCR = _BV(SPE) | _BV(MSTR);
+#endif
+	// Go as fast as possible.
 	SPSR = _BV(SPI2X);
 
 	unsigned char ee_rd = eeprom_read_byte(EE_TIMEZONE);
@@ -955,22 +1031,22 @@ void __ATTR_NORETURN__ main(void) {
 
 	while(1) {
 		wdt_reset();
-		unsigned int local_lpt, tcnt1;
+		unsigned long local_lpt, now;
 		ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
 			local_lpt = last_pps_tick;
-			tcnt1 = TCNT1;
+			now = timer_value();
 		}
 		// If we've not seen a PPS pulse in a certain amount of time, then
 		// without doing something like this, the wrong time would just get stuck.
-		if (local_lpt != 0 && tcnt1 - local_lpt > LOST_PPS_TICKS) {
+		if (local_lpt != 0 && now - local_lpt > LOST_PPS_TICKS) {
 			write_no_sig();
 			last_pps_tick = 0;
 			continue;
 		}
 #ifdef TENTH_DIGIT
 		if (tenth_ticks != 0) {
-			unsigned int current_tick = tcnt1 - local_lpt;
-			unsigned int current_tenth = (current_tick / tenth_ticks) % 10;
+			unsigned long current_tick = now - local_lpt;
+			unsigned int current_tenth = (unsigned int)((current_tick / tenth_ticks) % 10);
 			if (disp_tenth != current_tenth) {
 				// Write the tenth-of-a-second digit, preserving the
 				// decimal point state (just in case)
