@@ -1046,12 +1046,28 @@ void __ATTR_NORETURN__ main(void) {
 #ifdef TENTH_DIGIT
 		if (tenth_ticks != 0) {
 			unsigned long current_tick = now - local_lpt;
+			unsigned char ldt;
+			ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
+				ldt = disp_tenth;
+			}
 			unsigned int current_tenth = (unsigned int)((current_tick / tenth_ticks) % 10);
-			if (disp_tenth != current_tenth) {
+			// if ldt is 0 and current_tenth is 9, then that means that
+			// the ISR changed disp_tenth out from under us. In that
+			// case, we don't really want to write the 9 on top of the
+			// zero that just happend. Next time we come through, though,
+			// current_tenth will be 0 since last_pps_tick will have changed.
+			if (ldt != current_tenth && !(ldt == 0 && current_tenth == 9)) {
+				// This is really only volatite during the 0 tenth ISR.
+				disp_tenth = current_tenth;
 				// Write the tenth-of-a-second digit, preserving the
 				// decimal point state (just in case)
-				write_reg(MAX_REG_MASK_BOTH | DIGIT_100_MSEC, current_tenth | (tenth_dp ? MASK_DP : 0));
-				disp_tenth = current_tenth;
+				// We don't do this on tenth zero, though, becuase SPI
+				// blocks interrupts and we don't want to delay the zero
+				// second interrupt, which in principle should happen simultaneously.
+				// We also don't need to write the tenth digit during tenth zero because
+				// the PPS handler already did it for us.
+				if (current_tenth != 0)
+					write_reg(MAX_REG_MASK_BOTH | DIGIT_100_MSEC, current_tenth | (tenth_dp ? MASK_DP : 0));
 			}
 		}
 #endif
