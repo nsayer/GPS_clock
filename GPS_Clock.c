@@ -663,9 +663,9 @@ ISR(INT0_vect) {
 	// then the interrupt is pending because it came (shortly) after we sampled, so
 	// we don't compensate. "close" can simply be testing the MSB for 0.
 #ifdef V3
-	if ((TIFR2 & TOV2) && !(this_tick & 0x8000)) this_tick += 0x10000L;
+	if ((TIFR2 & _BV(TOV2)) && !(this_tick & 0x8000)) this_tick += 0x10000L;
 #else
-	if ((TIFR1 & TOV1) && !(this_tick & 0x8000)) this_tick += 0x10000L;
+	if ((TIFR1 & _BV(TOV1)) && !(this_tick & 0x8000)) this_tick += 0x10000L;
 #endif
 
 #ifdef TENTH_DIGIT
