@@ -282,7 +282,7 @@ void write_reg(const unsigned char addr, const unsigned char val) {
 
 const unsigned char month_tweak[] PROGMEM = {0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4 };
 
-static unsigned char first_sunday(unsigned char m, unsigned int y) {
+static inline unsigned char first_sunday(unsigned char m, unsigned int y) {
 	// first, what's the day-of-week for the first day of whatever month?
 	// From http://en.wikipedia.org/wiki/Determination_of_the_day_of_the_week
 	y -= m < 3;
@@ -294,7 +294,7 @@ static unsigned char first_sunday(unsigned char m, unsigned int y) {
 	return (dow == 0)?1:(8 - dow);
 }
 
-static unsigned char calculateDSTAU(const unsigned char d, const unsigned char m, const unsigned int y) {
+static inline unsigned char calculateDSTAU(const unsigned char d, const unsigned char m, const unsigned int y) {
         // DST is in effect between the first Sunday in October and the first Sunday in April
         unsigned char change_day;
         switch(m) {
@@ -326,7 +326,7 @@ static unsigned char calculateDSTAU(const unsigned char d, const unsigned char m
                         return 255;
         }
 }
-static unsigned char calculateDSTNZ(const unsigned char d, const unsigned char m, const unsigned int y) {
+static inline unsigned char calculateDSTNZ(const unsigned char d, const unsigned char m, const unsigned int y) {
         // DST is in effect between the last Sunday in September and the first Sunday in April
         unsigned char change_day;
         switch(m) {
@@ -359,7 +359,7 @@ static unsigned char calculateDSTNZ(const unsigned char d, const unsigned char m
                         return 255;
         }
 }
-static unsigned char calculateDSTEU(const unsigned char d, const unsigned char m, const unsigned int y) {
+static inline unsigned char calculateDSTEU(const unsigned char d, const unsigned char m, const unsigned int y) {
         // DST is in effect between the last Sunday in March and the last Sunday in October
         unsigned char change_day;
         switch(m) {
@@ -393,7 +393,7 @@ static unsigned char calculateDSTEU(const unsigned char d, const unsigned char m
                         return 255;
         }
 }
-static unsigned char calculateDSTUS(const unsigned char d, const unsigned char m, const unsigned int y) {
+static inline unsigned char calculateDSTUS(const unsigned char d, const unsigned char m, const unsigned int y) {
 	// DST is in effect between the 2nd Sunday in March and the first Sunday in November
 	// The return values here are that DST is in effect, or it isn't, or it's beginning
 	// for the year today or it's ending today.
@@ -427,7 +427,7 @@ static unsigned char calculateDSTUS(const unsigned char d, const unsigned char m
 			return 255;
 	}
 }
-static unsigned char calculateDST(const unsigned char d, const unsigned char m, const unsigned int y) {
+static inline unsigned char calculateDST(const unsigned char d, const unsigned char m, const unsigned int y) {
         switch(dst_mode) {
                 case DST_US:
                         return calculateDSTUS(d, m, y);
@@ -442,7 +442,7 @@ static unsigned char calculateDST(const unsigned char d, const unsigned char m, 
         }
 }
 
-static void handle_time(char h, unsigned char m, unsigned char s, unsigned char dst_flags) {
+static inline void handle_time(char h, unsigned char m, unsigned char s, unsigned char dst_flags) {
 	// What we get is the current second. We have to increment it
 	// to represent the *next* second.
 	s++;
@@ -534,7 +534,7 @@ static unsigned char hexChar(unsigned char c) {
 	return (unsigned char)(outP - hexes);
 }
 
-static void handleGPS() {
+static inline void handleGPS() {
 	unsigned int str_len = rx_str_len; // rx_str_len is where the \0 was written.
  
 	if (str_len < 9) return; // No sentence is shorter than $GPGGA*xx
@@ -622,13 +622,24 @@ static void write_no_sig() {
         write_reg(MAX_REG_MASK_BOTH | 5, MASK_A | MASK_C | MASK_D | MASK_F | MASK_G); // S
 }
 
-static unsigned long timer_value() {
+static inline unsigned long timer_value() __attribute__ ((always_inline));
+static inline unsigned long timer_value() {
 	unsigned long now;
 	ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
+		// We have to be careful. It's possible that we capture TCNTn at the same
+		// time as an overflow. If that happens, it means that the hibits value
+		// is 1 too low. We can detect this by checking if the low bits are
+		// "close" to zero and if the overflow interrupt is pending. If that's
+		// true, then we can compensate locally for the missing interrupt (and
+		// it will happen when we return anyway). If the low bits are high,
+		// then the interrupt is pending because it came (shortly) after we sampled, so
+		// we don't compensate. "close" can simply be testing the MSB for 0.
 #ifdef V3
 		now = (((unsigned long)timer_hibits) << 16) | TCNT2;
+		if ((TIFR2 & _BV(TOV2)) && !(now & 0x8000)) now += 0x10000L;
 #else
 		now = (((unsigned long)timer_hibits) << 16) | TCNT1;
+		if ((TIFR1 & _BV(TOV1)) && !(now & 0x8000)) now += 0x10000L;
 #endif
 	}
 	return now;
@@ -655,13 +666,6 @@ ISR(INT0_vect) {
 	unsigned long this_tick = (((unsigned long)timer_hibits) << 16) | TCNT1;
 #endif
 
-	// Sometimes the overflow and capture interrupts collide. When this happens,
-	// it means that the hibits value is 1 too low. We can detect this by
-	// checking if the low bits are "close" to zero and if the overflow interrupt
-	// is pending. If that's true, then we can compensate locally for the missing
-	// interrupt (and it will happen when we return anyway). If the low bits are high,
-	// then the interrupt is pending because it came (shortly) after we sampled, so
-	// we don't compensate. "close" can simply be testing the MSB for 0.
 #ifdef V3
 	if ((TIFR2 & _BV(TOV2)) && !(this_tick & 0x8000)) this_tick += 0x10000L;
 #else
