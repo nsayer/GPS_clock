@@ -27,7 +27,14 @@
 #define V2
 
 // V3 has the PPS line going into ICP2 instead of ICP1 so !SS can be !D_CS
-//#define V3
+#define V3
+
+// V3.1 has the two buttons moved to port A to make room for the crystal
+// on pins B0 & B1.
+//#define V31
+
+// Define this if your board uses an 12 MHz crystal instead of the RC oscillator
+//#define XTAL
 
 // !NEW_AMPM hardware has AM on the digit 7 DP and PM on the digit 6 DP
 #define NEW_AMPM
@@ -38,6 +45,14 @@
 // Older hardware doesn't have colons.
 #define COLONS
 // ---
+
+#if (defined(V31) && !defined(V3))
+#error V31 requires V3
+#endif
+
+#if (defined(XTAL) && !defined(V31))
+#error XTAL requires V31
+#endif
 
 #if (defined(V3) && !defined(V2))
 #error V3 requires V2
@@ -55,8 +70,14 @@
 #include <avr/pgmspace.h>
 #include <util/atomic.h>
 
+#ifdef XTAL
+// 12 MHz.
+#define F_CPU (12000000UL)
+#else
 // 8 MHz.
 #define F_CPU (8000000UL)
+#endif
+
 #include <util/delay.h>
 
 // UBRR?_VALUE macros defined here are used below in serial initialization in main()
@@ -134,6 +155,18 @@
 
 #define RX_BUF_LEN (96)
 
+#ifdef V31
+#define PORT_SW PINA
+#define SW_0_BIT _BV(PINA0)
+#define SW_1_BIT _BV(PINA3)
+// DDR_BITS_A doesn't need to be adjusted. The correct bits are already inputs.
+// Port B only has the PPS input, so it's zero.
+#define DDR_BITS_B (0)
+// Note that some versions of the AVR LIBC forgot to
+// define the individual PUExn bit numbers. If you have
+// a version like this, then just use _BV(0) | _BV(2).
+#define PULLUP_BITS_A _BV(PUEA0) | _BV(PUEA3)
+#else
 // Port B is the switches and the PPS GPS input
 #define PORT_SW PINB
 #define DDR_BITS_B (0)
@@ -143,13 +176,11 @@
 #else
 #define SW_1_BIT _BV(PINB2)
 #endif
-// Note that some versions of the AVR LIBC forgot to
-// define the individual PUExn bit numbers. If you have
-// a version like this, then just use _BV(0) | _BV(2).
 #ifdef V3
 #define PULLUP_BITS_B _BV(PUEB0) | _BV(PUEB1)
 #else
 #define PULLUP_BITS_B _BV(PUEB0) | _BV(PUEB2)
+#endif
 #endif
 
 // These are return values from the DST detector routine.
@@ -946,7 +977,11 @@ void __ATTR_NORETURN__ main(void) {
 	DDRA = DDR_BITS_A;
 
 	DDRB = DDR_BITS_B;
+#ifdef V31
+	PUEA = PULLUP_BITS_A;
+#else
 	PUEB = PULLUP_BITS_B;
+#endif
 
 	UBRR0H = UBRRH_VALUE;
 	UBRR0L = UBRRL_VALUE;
