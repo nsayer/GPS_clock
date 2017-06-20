@@ -242,6 +242,7 @@
 volatile unsigned char disp_buf[8];
 volatile unsigned char rx_buf[RX_BUF_LEN];
 volatile unsigned char rx_str_len;
+volatile unsigned char GPS_ready;
 volatile unsigned long last_pps_tick;
 volatile unsigned long tenth_ticks;
 volatile unsigned char gps_locked;
@@ -610,8 +611,8 @@ static inline void handleGPS() {
 		// The problem is that our D/M/Y is UTC, but DST decisions are made in the local
 		// timezone. We can adjust the day against standard time midnight, and
 		// that will be good enough. Don't worry that this can result in d being either 0
-		// or past the last day of the month. Neither of those will match the "decision day"
-		// for DST, which is the only day on which the day of the month is significant.
+		// or past the last day of the month. Those will still be more or less than the "decision day"
+		// for DST, which is all that really matters.
 		if (h + tz_hour < 0) d--;
 		if (h + tz_hour > 23) d++;
 		unsigned char dst_flags = calculateDST(d, mon, y);
@@ -626,13 +627,13 @@ static inline void handleGPS() {
 
 ISR(USART0_RX_vect) {
 	unsigned char rx_char = UDR0;
-  
+ 
+	if (GPS_ready) return; // ignore serial until current buffer handled 
 	if (rx_str_len == 0 && rx_char != '$') return; // wait for a "$" to start the line.
 	rx_buf[rx_str_len] = rx_char;
 	if (rx_char == 0x0d || rx_char == 0x0a) {
 		rx_buf[rx_str_len] = 0; // null terminate
-		handleGPS();
-		rx_str_len = 0; // now clear the buffer
+		GPS_ready = 1;
 		return;
 	}
 	if (++rx_str_len == RX_BUF_LEN) {
@@ -954,7 +955,7 @@ static void menu_select() {
 			break;
 #endif
 		case 6: // brightness
-			if (++brightness > 15) brightness = 0;
+			brightness = ((brightness + 4) & 0xf) | 0x3;
 			break;
 	}
 	menu_render();
@@ -1002,6 +1003,7 @@ void __ATTR_NORETURN__ main(void) {
 #endif
 
 	rx_str_len = 0;
+	GPS_ready = 0;
 
 #ifdef V2
 #ifdef V3
@@ -1048,7 +1050,7 @@ void __ATTR_NORETURN__ main(void) {
 	// Turn off the shut-down register, clear the digit data
 	write_reg(MAX_REG_CONFIG, MAX_REG_CONFIG_R | MAX_REG_CONFIG_B | MAX_REG_CONFIG_S | MAX_REG_CONFIG_E);
 	write_reg(MAX_REG_SCAN_LIMIT, 7); // display all 8 digits
-	brightness = eeprom_read_byte(EE_BRIGHTNESS) & 0xf;
+	brightness = (eeprom_read_byte(EE_BRIGHTNESS) & 0xf) | 0x3;
 	write_reg(MAX_REG_INTENSITY, brightness);
 
 #ifdef TENTH_DIGIT
@@ -1070,6 +1072,13 @@ void __ATTR_NORETURN__ main(void) {
 
 	while(1) {
 		wdt_reset();
+		if (GPS_ready) {
+			// Do this out here so it's not in an interrupt-disabled context.
+			handleGPS();
+			rx_str_len = 0; // now clear the buffer
+			GPS_ready = 0;
+			continue;
+		}
 		unsigned long local_lpt, now;
 		ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
 			local_lpt = last_pps_tick;
