@@ -1,13 +1,18 @@
 
 # Change this to whatever AVR programmer you want to use.
-PROGRAMMER = pihat
+PROGRAMMER = usbtiny
 
+# Add _v4 or _v5 for versions >= 4.
 OUT=GPS_Clock
+
+# For v3 or previous clocks
 CHIP = attiny841
+# For v4 or v5 clocks
+#CHIP = atxmega32e5
 
 CC = avr-gcc
 OBJCPY = avr-objcopy
-AVRDUDE = avrdude
+AVRDUDE = avrdude -B 0.1
 OPTS = -Os -g -std=c11 -Wall -Wno-main
 
 CFLAGS = -mmcu=$(CHIP) $(OPTS)
