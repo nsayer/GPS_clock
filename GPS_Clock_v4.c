@@ -132,11 +132,11 @@
 #define EE_TENTHS ((uint8_t*)4)
 #define EE_COLONS ((uint8_t*)5)
 
-// This is the timer frequency - it's the system clock prescaled by 64
+// This is the timer frequency - it's the system clock prescaled by 1
 // Keep this synced with the configuration of Timer C4!
-#define F_TICK (F_CPU / 64)
+#define F_TICK (F_CPU / 1)
 
-// We want something like 50 ms.
+// We want something like 50 ms. - 1/20 sec
 #define DEBOUNCE_TICKS (F_TICK / 20)
 // The buttons
 #define SELECT 1
@@ -536,16 +536,22 @@ static inline unsigned long timer_value() {
 	// CCA causes an interrupt, but CCB doesn't, so use a
 	// synthetic capture to grab the current value. This avoids
 	// having to deal with overflow propagation issues.
-	EVSYS.STROBE = _BV(1); // event channel 1 
-	_NOP(); // propagation delay
-	_NOP();
-	_NOP();
-	_NOP();
-	return (((unsigned long)TCC5.CCB) << 16) | TCC4.CCB;
+	unsigned long out;
+	ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
+		EVSYS.STROBE = _BV(1); // event channel 0
+		while((!(TCC4.INTFLAGS & TC4_CCBIF_bm)) || (!(TCC5.INTFLAGS & TC5_CCBIF_bm))) ; // wait for both words
+		out = (((unsigned long)TCC5.CCB) << 16) | TCC4.CCB;
+	}
+	return out;
 }
 
-ISR(TCC4_CCA_vect) {
-	unsigned long this_tick = (((unsigned long)TCC5.CCA) << 16) | TCC4.CCA;
+ISR(TCC5_CCA_vect) {
+	unsigned long this_tick;
+	ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
+		while((!(TCC4.INTFLAGS & TC4_CCAIF_bm)) || (!(TCC5.INTFLAGS & TC5_CCAIF_bm))) ; // wait for both words
+		this_tick = (((unsigned long)TCC5.CCA) << 16) | TCC4.CCA;
+	}
+	//if (this_tick == 0) this_tick++; // it can never be zero
 
 	if (menu_pos == 0 && tenth_enable && last_pps_tick != 0) {
 		tenth_ticks = (this_tick - last_pps_tick) / 10;
@@ -558,7 +564,6 @@ ISR(TCC4_CCA_vect) {
 		tenth_ticks = 0;
 	}
 	last_pps_tick = this_tick;
-	if (last_pps_tick == 0) last_pps_tick++; // it can never be zero
 
 	if (menu_pos) return;
 	if (!gps_locked) {
@@ -587,8 +592,8 @@ ISR(TCC4_CCA_vect) {
 	// (it used to be used for PM), then it will wind up changing *early*
 	// if you're not careful.
 	tenth_dp = (disp_buf[DIGIT_100_MSEC] & MASK_DP) != 0;
-	write_reg(MAX_REG_DEC_MODE, decode_mask);
 
+	write_reg(MAX_REG_DEC_MODE, decode_mask);
 	// Copy the display buffer data into the display, but do the least
 	// significant digits first, for great justice.
 	for(int i = sizeof(disp_buf) - 1; i >= 0; i--) {
@@ -784,8 +789,6 @@ void __ATTR_NORETURN__ main(void) {
 	// Run the CPU at 32 MHz.
 	OSC.CTRL = OSC_RC32MEN_bm;
 	while(!(OSC.STATUS & OSC_RC32MRDY_bm)) ; // wait for it.
-	_PROTECTED_WRITE(CLK.CTRL, CLK_SCLKSEL_RC32M_gc); // switch to it
-	OSC.CTRL &= ~(OSC_RC2MEN_bm); // we're done with the 2 MHz osc.
 
 	OSC.DFLLCTRL = 0; // internal reference - maybe 32 kHz crystal someday?
 	DFLLRC32M.COMP1 = (F_CPU / 1024) & 0xff;
@@ -796,9 +799,16 @@ void __ATTR_NORETURN__ main(void) {
 	NVM.CMD = 0;
 	DFLLRC32M.CTRL = DFLL_ENABLE_bm; // turn it on.
 
-	//wdt_enable(WDTO_1S); Somehow, this doesn't work.
-	_PROTECTED_WRITE(WDT.CTRL, WDT_PER_1KCLK_gc | WDT_ENABLE_bm | WDT_CEN_bm);
+	_PROTECTED_WRITE(CLK.CTRL, CLK_SCLKSEL_RC32M_gc); // switch to it
+	OSC.CTRL &= ~(OSC_RC2MEN_bm); // we're done with the 2 MHz osc.
+
+	//wdt_enable(WDTO_1S); // This is broken on XMegas.
+	// This replacement code doesn't disable interrupts (but they're not on now anyway)
+	_PROTECTED_WRITE(WDT.CTRL, WDT_PER_256CLK_gc | WDT_ENABLE_bm | WDT_CEN_bm);
+	while(WDT.STATUS & WDT_SYNCBUSY_bm) ; // wait for it to take
+	// We don't want a windowed watchdog.
 	_PROTECTED_WRITE(WDT.WINCTRL, WDT_WCEN_bm);
+	while(WDT.STATUS & WDT_SYNCBUSY_bm) ; // wait for it to take
 
 	// Leave on only the parts of the chip we use.
 	PR.PRGEN = PR_XCL_bm | PR_RTC_bm | PR_EDMA_bm;
@@ -837,16 +847,13 @@ void __ATTR_NORETURN__ main(void) {
 	SPIC.INTCTRL = 0;
 	SPIC.CTRLB = 0;
 
-	TCC4.CTRLA = TC45_CLKSEL_DIV64_gc; // 500 kHz timer clocking - 2 microsecond granularity
+	TCC4.CTRLA = TC45_CLKSEL_DIV1_gc; // 32 MHz timer clocking - 31.25 ns granularity
 	TCC4.CTRLB = 0;
 	TCC4.CTRLC = 0;
-	TCC4.CTRLD = TC45_EVSEL_CH0_gc; // capture on event 0
+	TCC4.CTRLD = TC45_EVSEL_CH0_gc; // capture on event A:0 B:1
 	TCC4.CTRLE = TC45_CCBMODE_CAPT_gc | TC45_CCAMODE_CAPT_gc;
 	TCC4.INTCTRLA = 0;
-	TCC4.INTCTRLB = TC45_CCAINTLVL_MED_gc;
-	TCC4.PER = 0xffff;
-	TCC4.CNT = 0;
-	TCC4.CTRLGCLR = TC4_STOP_bm; // clear the STOP bit
+	TCC4.INTCTRLB = 0; // we'll use TCC5 for this
 
 	TCC5.CTRLA = TC45_CLKSEL_EVCH4_gc; // Clock from timer 4's overflow
 	TCC5.CTRLB = 0;
@@ -854,10 +861,7 @@ void __ATTR_NORETURN__ main(void) {
 	TCC5.CTRLD = TC5_EVDLY_bm | TC45_EVSEL_CH0_gc; // We're cascading 32 bits - we must delay capture events 1 cycle
 	TCC5.CTRLE = TC45_CCBMODE_CAPT_gc | TC45_CCAMODE_CAPT_gc;
 	TCC5.INTCTRLA = 0;
-	TCC5.INTCTRLB = 0; // we're already interrupting from TCC4.
-	TCC5.PER = 0xffff;
-	TCC5.CNT = 0;
-	TCC5.CTRLGCLR = TC5_STOP_bm; // clear the STOP bit
+	TCC5.INTCTRLB = TC45_CCAINTLVL_MED_gc;
 
 	unsigned char ee_rd = eeprom_read_byte(EE_TIMEZONE);
 	if (ee_rd == 0xff)
@@ -880,8 +884,8 @@ void __ATTR_NORETURN__ main(void) {
 	tenth_ticks = 0;
 	disp_tenth = 0;
 
-	// Enable all levels of the interrupt controller
-	PMIC.CTRL = PMIC_HILVLEN_bm | PMIC_MEDLVLEN_bm | PMIC_LOLVLEN_bm;
+	// Enable high level of the interrupt controller
+	PMIC.CTRL = PMIC_HILVLEN_bm;
 	sei(); // turn interrupts on
 
 	// Turn off the shut-down register, clear the digit data
@@ -894,6 +898,9 @@ void __ATTR_NORETURN__ main(void) {
 	write_reg(MAX_REG_TEST, 1);
 	Delay(1000);
 	write_reg(MAX_REG_TEST, 0);
+
+	// Now enable the medium and low interrupts (capture & serial)
+	PMIC.CTRL |= PMIC_MEDLVLEN_bm | PMIC_LOLVLEN_bm;
 	write_no_sig();
 
 	while(1) {
@@ -904,20 +911,25 @@ void __ATTR_NORETURN__ main(void) {
 			nmea_ready = 0;
 			continue;
 		}
-		unsigned long local_lpt, now;
+		unsigned long local_lpt, now, current_tick;
 		ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
-			local_lpt = last_pps_tick;
-			now = timer_value();
+			// it's not at all clear how "last_pps_tick" could *ever* be larger than
+			// the result from timer_value() with interupts disabled. But sometimes it is.
+			do {
+				local_lpt = last_pps_tick;
+				now = timer_value();
+				current_tick = now - local_lpt;
+			} while(current_tick & 0x80000000); // WTF? How is this ever possible?
 		}
 		// If we've not seen a PPS pulse in a certain amount of time, then
 		// without doing something like this, the wrong time would just get stuck.
-		if (local_lpt != 0 && now - local_lpt > LOST_PPS_TICKS) {
+		if (local_lpt != 0 && current_tick > LOST_PPS_TICKS) {
 			write_no_sig();
 			last_pps_tick = 0;
+			tenth_ticks = 0;
 			continue;
 		}
 		if (tenth_ticks != 0) {
-			unsigned long current_tick = now - local_lpt;
 			unsigned char ldt;
 			ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
 				ldt = disp_tenth;
