@@ -160,13 +160,13 @@ volatile unsigned long last_pps_tick;
 volatile unsigned char last_pps_tick_good;
 volatile unsigned long tenth_ticks;
 volatile unsigned char gps_locked;
-volatile unsigned char dst_mode;
 volatile unsigned char ampm;
 volatile unsigned char menu_pos;
-volatile char tz_hour;
 volatile unsigned char tenth_enable;
 volatile unsigned char disp_tenth;
 volatile unsigned char tenth_dp;
+unsigned char dst_mode;
+char tz_hour;
 unsigned char colon_state;
 unsigned long debounce_time;
 unsigned char button_down;
@@ -203,7 +203,7 @@ void write_reg(const unsigned char addr, const unsigned char val) {
 	}
 }
 
-const unsigned char month_tweak[] PROGMEM = {0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4 };
+static const unsigned char month_tweak[] PROGMEM = {0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4 };
 
 static inline unsigned char first_sunday(unsigned char m, unsigned int y) {
 	// first, what's the day-of-week for the first day of whatever month?
@@ -434,7 +434,7 @@ static const char *skip_commas(const char *ptr, const int num) {
 	return ptr;
 }
 
-const char hexes[] PROGMEM = "0123456789abcdef";
+static const char hexes[] PROGMEM = "0123456789abcdef";
 
 static unsigned char hexChar(unsigned char c) {
 	if (c >= 'A' && c <= 'F') c += ('a' - 'A'); // make lower case
@@ -531,26 +531,28 @@ static void write_no_sig() {
         write_reg(MAX_REG_MASK_BOTH | 5, MASK_A | MASK_C | MASK_D | MASK_F | MASK_G); // S
 }
 
+// Note that this function MUST be called from an atomic block.
 static inline unsigned long timer_value() __attribute__ ((always_inline));
 static inline unsigned long timer_value() {
 	// We've configured event block 0-3 for timer C 4/5 capture.
 	// CCA causes an interrupt, but CCB doesn't, so use a
 	// synthetic capture to grab the current value. This avoids
 	// having to deal with overflow propagation issues.
-	unsigned long out;
-	ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
-		EVSYS.STROBE = _BV(1); // event channel 0
-		while((!(TCC4.INTFLAGS & TC4_CCBIF_bm)) || (!(TCC5.INTFLAGS & TC5_CCBIF_bm))) ; // wait for both words
-		out = (((unsigned long)TCC5.CCB) << 16) | TCC4.CCB;
-	}
+	EVSYS.STROBE = _BV(1); // event channel 1
+	while(!((TCC4.INTFLAGS & TC4_CCBIF_bm) && (TCC5.INTFLAGS & TC5_CCBIF_bm))) ; // wait for both words
+	unsigned long out = (((unsigned long)TCC5.CCB) << 16) | TCC4.CCB;
+	TCC4.INTFLAGS = TC4_CCBIF_bm; // XXX Why is this necessary?
+	TCC5.INTFLAGS = TC5_CCBIF_bm;
 	return out;
 }
 
 ISR(TCC5_CCA_vect) {
 	unsigned long this_tick;
 	ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
-		while((!(TCC4.INTFLAGS & TC4_CCAIF_bm)) || (!(TCC5.INTFLAGS & TC5_CCAIF_bm))) ; // wait for both words
+		while(!((TCC4.INTFLAGS & TC4_CCAIF_bm) && (TCC5.INTFLAGS & TC5_CCAIF_bm))) ; // wait for both words
 		this_tick = (((unsigned long)TCC5.CCA) << 16) | TCC4.CCA;
+		TCC4.INTFLAGS = TC4_CCAIF_bm; // XXX Why is this necessary?
+		TCC5.INTFLAGS = TC5_CCAIF_bm;
 	}
 	if (last_pps_tick_good) {
 		// DIY GPS driven FLL for the 32 MHz oscillator.
@@ -612,7 +614,10 @@ ISR(TCC5_CCA_vect) {
 }
 
 static unsigned char check_buttons() {
-	unsigned long now = timer_value();
+	unsigned long now;
+	ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
+		now = timer_value();
+	}
 	if (debounce_time != 0 && now - debounce_time < DEBOUNCE_TICKS) {
 		// We don't pay any attention to the buttons during debounce time.
 		return 0;
@@ -915,14 +920,10 @@ void __ATTR_NORETURN__ main(void) {
 		unsigned long local_lpt, now, current_tick;
 		unsigned char local_lptg;
 		ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
-			// it's not at all clear how "last_pps_tick" could *ever* be larger than
-			// the result from timer_value() with interupts disabled. But sometimes it is.
-			do {
-				local_lpt = last_pps_tick;
-				local_lptg = last_pps_tick_good;
-				now = timer_value();
-				current_tick = now - local_lpt;
-			} while(current_tick & 0x80000000); // WTF? How is this ever possible?
+			local_lpt = last_pps_tick;
+			local_lptg = last_pps_tick_good;
+			now = timer_value();
+			current_tick = now - local_lpt;
 		}
 		// If we've not seen a PPS pulse in a certain amount of time, then
 		// without doing something like this, the wrong time would just get stuck.
