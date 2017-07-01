@@ -157,6 +157,7 @@ volatile unsigned char rx_buf[RX_BUF_LEN];
 volatile unsigned char rx_str_len;
 volatile unsigned char nmea_ready;
 volatile unsigned long last_pps_tick;
+volatile unsigned char last_pps_tick_good;
 volatile unsigned long tenth_ticks;
 volatile unsigned char gps_locked;
 volatile unsigned char dst_mode;
@@ -551,18 +552,27 @@ ISR(TCC5_CCA_vect) {
 		while((!(TCC4.INTFLAGS & TC4_CCAIF_bm)) || (!(TCC5.INTFLAGS & TC5_CCAIF_bm))) ; // wait for both words
 		this_tick = (((unsigned long)TCC5.CCA) << 16) | TCC4.CCA;
 	}
-	//if (this_tick == 0) this_tick++; // it can never be zero
+	if (last_pps_tick_good) {
+		// DIY GPS driven FLL for the 32 MHz oscillator.
+		unsigned long pps_tick_count = this_tick - last_pps_tick;
+		if (pps_tick_count < F_CPU) DFLLRC32M.CALA++; // too slow
+		else if (pps_tick_count > F_CPU) DFLLRC32M.CALA--; // too fast
+	}
 
-	if (menu_pos == 0 && tenth_enable && last_pps_tick != 0) {
+	// If we're in the menus, or if we've disabled 10ths or if this is
+	// our first PPS (since good was set to 0), then we don't do the
+	// tenth digit.
+	if (menu_pos == 0 && tenth_enable && last_pps_tick_good) {
 		tenth_ticks = (this_tick - last_pps_tick) / 10;
 		// For unknown reasons we seemingly sometimes get spurious
 		// PPS interrupts. If the calculus leads us to believe a
 		// a tenth of a second is less than 50 ms worth of system clock,
 		// then it's not right - just skip it.
-		if (tenth_ticks < FAST_PPS_TICKS) tenth_ticks = 0;
+		//if (tenth_ticks < FAST_PPS_TICKS) tenth_ticks = 0;
 	} else {
 		tenth_ticks = 0;
 	}
+	last_pps_tick_good = 1;
 	last_pps_tick = this_tick;
 
 	if (menu_pos) return;
@@ -790,15 +800,6 @@ void __ATTR_NORETURN__ main(void) {
 	OSC.CTRL = OSC_RC32MEN_bm;
 	while(!(OSC.STATUS & OSC_RC32MRDY_bm)) ; // wait for it.
 
-	OSC.DFLLCTRL = 0; // internal reference - maybe 32 kHz crystal someday?
-	DFLLRC32M.COMP1 = (F_CPU / 1024) & 0xff;
-	DFLLRC32M.COMP2 = (F_CPU / 1024) >> 8;
-	NVM.CMD = NVM_CMD_READ_CALIB_ROW_gc;
-	DFLLRC32M.CALA = pgm_read_byte(offsetof(NVM_PROD_SIGNATURES_t, RCOSC32MA));
-	DFLLRC32M.CALB = pgm_read_byte(offsetof(NVM_PROD_SIGNATURES_t, RCOSC32M));
-	NVM.CMD = 0;
-	DFLLRC32M.CTRL = DFLL_ENABLE_bm; // turn it on.
-
 	_PROTECTED_WRITE(CLK.CTRL, CLK_SCLKSEL_RC32M_gc); // switch to it
 	OSC.CTRL &= ~(OSC_RC2MEN_bm); // we're done with the 2 MHz osc.
 
@@ -880,7 +881,7 @@ void __ATTR_NORETURN__ main(void) {
 	menu_pos = 0;
 	debounce_time = 0;
 	button_down = 0;
-	last_pps_tick = 0;
+	last_pps_tick_good = 0;
 	tenth_ticks = 0;
 	disp_tenth = 0;
 
@@ -912,20 +913,22 @@ void __ATTR_NORETURN__ main(void) {
 			continue;
 		}
 		unsigned long local_lpt, now, current_tick;
+		unsigned char local_lptg;
 		ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
 			// it's not at all clear how "last_pps_tick" could *ever* be larger than
 			// the result from timer_value() with interupts disabled. But sometimes it is.
 			do {
 				local_lpt = last_pps_tick;
+				local_lptg = last_pps_tick_good;
 				now = timer_value();
 				current_tick = now - local_lpt;
 			} while(current_tick & 0x80000000); // WTF? How is this ever possible?
 		}
 		// If we've not seen a PPS pulse in a certain amount of time, then
 		// without doing something like this, the wrong time would just get stuck.
-		if (local_lpt != 0 && current_tick > LOST_PPS_TICKS) {
+		if (local_lptg && current_tick > LOST_PPS_TICKS) {
 			write_no_sig();
-			last_pps_tick = 0;
+			last_pps_tick_good = 0;
 			tenth_ticks = 0;
 			continue;
 		}
