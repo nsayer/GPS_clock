@@ -521,6 +521,7 @@ ISR(USARTC0_RXC_vect) {
 
 static void write_no_sig() {
 	tenth_ticks = 0;
+	last_pps_tick_good = 0;
 	// Clear out the digit data
 	write_reg(MAX_REG_CONFIG, MAX_REG_CONFIG_R | MAX_REG_CONFIG_B | MAX_REG_CONFIG_S | MAX_REG_CONFIG_E);
 	write_reg(MAX_REG_DEC_MODE, 0);
@@ -567,10 +568,10 @@ ISR(TCC5_CCA_vect) {
 	if (menu_pos == 0 && tenth_enable && last_pps_tick_good) {
 		tenth_ticks = (this_tick - last_pps_tick) / 10;
 		// For unknown reasons we seemingly sometimes get spurious
-		// PPS interrupts. If the calculus leads us to believe a
+		// PPS interrupts. If the math leads us to believe a
 		// a tenth of a second is less than 50 ms worth of system clock,
 		// then it's not right - just skip it.
-		//if (tenth_ticks < FAST_PPS_TICKS) tenth_ticks = 0;
+		if (tenth_ticks < FAST_PPS_TICKS) tenth_ticks = 0;
 	} else {
 		tenth_ticks = 0;
 	}
@@ -917,34 +918,30 @@ void __ATTR_NORETURN__ main(void) {
 			nmea_ready = 0;
 			continue;
 		}
-		unsigned long local_lpt, now, current_tick;
-		unsigned char local_lptg;
+		unsigned long local_lpt, local_tt;
+		unsigned char local_dt, local_lptg;
 		ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
 			local_lpt = last_pps_tick;
 			local_lptg = last_pps_tick_good;
-			now = timer_value();
-			current_tick = now - local_lpt;
+			local_dt = disp_tenth;
+			local_tt = tenth_ticks;
 		}
+		unsigned long now = timer_value();
+		unsigned long current_tick = now - local_lpt;
 		// If we've not seen a PPS pulse in a certain amount of time, then
 		// without doing something like this, the wrong time would just get stuck.
 		if (local_lptg && current_tick > LOST_PPS_TICKS) {
 			write_no_sig();
-			last_pps_tick_good = 0;
-			tenth_ticks = 0;
 			continue;
 		}
-		if (tenth_ticks != 0) {
-			unsigned char ldt;
-			ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
-				ldt = disp_tenth;
-			}
-			unsigned int current_tenth = (unsigned int)((current_tick / tenth_ticks) % 10);
-			// if ldt is 0 and current_tenth is 9, then that means that
+		if (local_tt != 0) {
+			unsigned int current_tenth = (unsigned int)((current_tick / local_tt) % 10);
+			// if local_dt is 0 and current_tenth is 9, then that means that
 			// the ISR changed disp_tenth out from under us. In that
 			// case, we don't really want to write the 9 on top of the
 			// zero that just happend. Next time we come through, though,
 			// current_tenth will be 0 since last_pps_tick will have changed.
-			if (ldt != current_tenth && !(ldt == 0 && current_tenth == 9)) {
+			if (local_dt != current_tenth && local_dt != 9) {
 				// This is really only volatite during the 0 tenth ISR.
 				disp_tenth = current_tenth;
 				// Write the tenth-of-a-second digit, preserving the
