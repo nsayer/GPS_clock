@@ -122,6 +122,11 @@
 // 10 kHz refresh rate - 4 interrupts per digit (brightness), 8 digits, 32 MHz freq.
 #define REFRESH_PERIOD (100)
 
+// How many brightness levels do we support? This is a tradeoff
+// between refresh frequency and brightness granularity.
+#define BRIGHTNESS_LEVELS 4
+
+// disp reg is the "registers" for the disply. It's what's actively being
 // This is the timer frequency - it's the system clock prescaled by 1
 // Keep this synced with the configuration of Timer C4!
 #define F_TICK (F_CPU / 1)
@@ -139,11 +144,6 @@
 // 50 ms worth of system clock.
 #define FAST_PPS_TICKS (F_TICK / 20)
 
-// How many brightness levels do we support? This is a tradeoff
-// between refresh frequency and brightness granularity.
-#define BRIGHTNESS_LEVELS 4
-
-// disp reg is the "registers" for the disply. It's what's actively being
 // displayed right now by the rastering system.
 volatile unsigned char disp_reg[8];
 // disp buf is the buffer where data is prepped for display during the next second.
@@ -885,6 +885,7 @@ void __ATTR_NORETURN__ main(void) {
 	TCD5.INTCTRLA = TC45_OVFINTLVL_HI_gc;
 	TCD5.INTCTRLB = 0;
 	TCD5.PER = REFRESH_PERIOD;
+
 	unsigned char ee_rd = eeprom_read_byte(EE_TIMEZONE);
 	if (ee_rd == 0xff)
 		tz_hour = -8;
@@ -918,7 +919,7 @@ void __ATTR_NORETURN__ main(void) {
 	// We want to wait for 1 second, but _delay_ms() assumes we get the whole
 	// CPU. So we'll use the timer instead.
 	unsigned long start = timer_value();
-	while(timer_value() - start < F_CPU) wdt_reset();
+	while(timer_value() - start < F_TICK) wdt_reset();
 
 	unsigned char b = eeprom_read_byte(EE_BRIGHTNESS);
 	if (b >= BRIGHTNESS_LEVELS) b = BRIGHTNESS_LEVELS - 1; // default to max
