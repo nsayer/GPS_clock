@@ -365,6 +365,8 @@ static inline unsigned char calculateDST(const unsigned char d, const unsigned c
         }
 }
 
+static inline void startLeapCheck();
+
 static inline void handle_time(char h, unsigned char m, unsigned char s, unsigned char dst_flags) {
 	// What we get is the current second. We have to increment it
 	// to represent the *next* second.
@@ -402,6 +404,9 @@ static inline void handle_time(char h, unsigned char m, unsigned char s, unsigne
 		if (h >= 24) h -= 24;
 	}
 
+	// Every hour, check to see if the leap second value in the receiver is out-of-date
+	unsigned char doLeapCheck = (m == 30 && s == 0);
+
 	unsigned char am = 0;
 	if (ampm) {
 		// Create AM or PM
@@ -423,8 +428,43 @@ static inline void handle_time(char h, unsigned char m, unsigned char s, unsigne
 	if (colon_state == COLON_ON || ((colon_state == COLON_BLINK) && (s % 2 == 0))) {
 		disp_buf[DIGIT_MISC] |= MASK_COLON_HM | MASK_COLON_MS;
 	}
+
+	if (doLeapCheck) startLeapCheck();
 }
 
+static inline void write_msg(const unsigned char *msg, const size_t length) {
+	for(int i = 0; i < length; i++) {
+		while(!(USARTC0.STATUS & USART_DREIF_bm)) ; // wait for ready
+		USARTC0.DATA = msg[i];
+	}
+}
+
+const unsigned char PROGMEM version_msg[] = { 0xa0, 0xa1, 0x00, 0x02, 0x02, 0x01, 0x03, 0x0d, 0x0a };
+static inline void startVersionCheck(void) {
+	// Ask for the firnware version. We expect a 0x80 in response
+	unsigned char msg[sizeof(version_msg)];
+	memcpy_P(msg, version_msg, sizeof(version_msg));
+	write_msg(msg, sizeof(msg));
+}
+
+const unsigned char PROGMEM leap_check_msg[] = { 0xa0, 0xa1, 0x00, 0x02, 0x64, 0x20, 0x44, 0x0d, 0x0a };
+static inline void startLeapCheck(void) {
+	// Ask for the time message. We expect a 0x64-0x8e in response
+	unsigned char msg[sizeof(leap_check_msg)];
+	memcpy_P(msg, leap_check_msg, sizeof(leap_check_msg));
+	write_msg(msg, sizeof(msg));
+}
+
+const unsigned char PROGMEM leap_update_msg[] = { 0xa0, 0xa1, 0x00, 0x04, 0x64, 0x1f, 0x00, 0x01, 0x7a, 0x0d, 0x0a };
+static inline void updateLeapDefault(unsigned char leap_offset) {
+	// This is a set leap-second default message. It will write the given
+	// offset to flash.
+	unsigned char msg[sizeof(leap_update_msg)];
+	memcpy_P(msg, leap_update_msg, sizeof(leap_update_msg));
+	msg[6] = leap_offset;
+	msg[8] ^= leap_offset; // fix the checksum
+	write_msg(msg, sizeof(msg));
+}
 static const char *skip_commas(const char *ptr, const int num) {
 	for(int i = 0; i < num; i++) {
 		ptr = strchr(ptr, ',');
@@ -445,6 +485,21 @@ static unsigned char hexChar(unsigned char c) {
 
 static inline void handleGPS() {
 	unsigned int str_len = rx_str_len; // rx_str_len is where the \0 was written.
+
+	if (str_len >= 3 && rx_buf[0] == 0xa0 && rx_buf[1] == 0xa1) { // binary protocol message
+		unsigned int payloadLength = (((unsigned int)rx_buf[2]) << 8) | rx_buf[3];
+		if (str_len != payloadLength + 5) return; // the A0, A1 bytes, length and checksum are added
+		unsigned int checksum = 0;
+		for(int i = 0; i < payloadLength; i++) checksum ^= rx_buf[i + 4];
+		if (checksum != rx_buf[payloadLength + 4]) return; // checksum mismatch
+		if (rx_buf[4] == 0x64 && rx_buf[5] == 0x8e) {
+			if (!(rx_buf[15 + 3] & (1 << 2))) return; // GPS leap seconds invalid
+			if (rx_buf[13 + 3] == rx_buf[14 + 3]) return; // Current and default agree
+			updateLeapDefault(rx_buf[14 + 3]);
+		} else {
+			return; // unknown binary protocol message
+		}
+	}
  
 	if (str_len < 9) return; // No sentence is shorter than $GPGGA*xx
 	// First, check the checksum of the sentence
@@ -506,7 +561,8 @@ ISR(USARTC0_RXC_vect) {
 	unsigned char rx_char = USARTC0.DATA;
  
 	if (nmea_ready) return; // ignore serial until current buffer is handled 
-	if (rx_str_len == 0 && rx_char != '$') return; // wait for a "$" to start the line.
+	if (rx_str_len == 0 && !(rx_char == '$' || rx_char == 0xa0)) return; // wait for a "$" or A0 to start the line.
+
 	rx_buf[rx_str_len] = rx_char;
 	if (rx_char == 0x0d || rx_char == 0x0a) {
 		rx_buf[rx_str_len] = 0; // null terminate
@@ -844,7 +900,7 @@ void __ATTR_NORETURN__ main(void) {
 	nmea_ready = 0;
 
 	USARTC0.CTRLA = USART_DRIE_bm | USART_RXCINTLVL_LO_gc;
-	USARTC0.CTRLB = USART_RXEN_bm; // if we ever want to talk to GPS, we can turn on TX.
+	USARTC0.CTRLB = USART_RXEN_bm | USART_TXEN_bm;
 	USARTC0.CTRLC = USART_CHSIZE_8BIT_gc;
 	USARTC0.CTRLD = 0;
 	USARTC0.BAUDCTRLA = BSEL & 0xff;
@@ -906,9 +962,43 @@ void __ATTR_NORETURN__ main(void) {
 	Delay(1000);
 	write_reg(MAX_REG_TEST, 0);
 
-	// Now enable the medium and low interrupts (capture & serial)
-	PMIC.CTRL |= PMIC_MEDLVLEN_bm | PMIC_LOLVLEN_bm;
+	// Now enable the serial interrupt
+	PMIC.CTRL |= PMIC_LOLVLEN_bm;
+
+	startVersionCheck();
+	unsigned long start = timer_value();
+	do {
+		wdt_reset();
+		if (nmea_ready) {
+			// This do block only exists so we can conveniently break out early.
+			// It's an alternative to a goto.
+			do {
+				unsigned int str_len = rx_str_len; // rx_str_len is where the \0 was written.
+				if (str_len < 5) break; // too short
+				if (rx_buf[0] != 0xa0 || rx_buf[1] != 0xa1) break; // Not a binary msg
+				unsigned int payloadLength = (((unsigned int)rx_buf[2]) << 8) | rx_buf[3];
+				if (str_len != payloadLength + 5) break; // the A0, A1 bytes, length and checksum are added
+				unsigned int checksum = 0;
+				for(int i = 0; i < payloadLength; i++) checksum ^= rx_buf[i + 4];
+				if (checksum != rx_buf[payloadLength + 4]) break; // checksum mismatch
+				if (payloadLength < 14 || rx_buf[4] != 0x80) break; // wrong message
+				write_reg(MAX_REG_DEC_MODE, 0x3f);
+				write_reg(MAX_REG_MASK_BOTH | DIGIT_10_HR, rx_buf[12 + 3] / 10);
+				write_reg(MAX_REG_MASK_BOTH | DIGIT_1_HR, rx_buf[12 + 3] % 10);
+				write_reg(MAX_REG_MASK_BOTH | DIGIT_10_MIN, rx_buf[13 + 3] / 10);
+				write_reg(MAX_REG_MASK_BOTH | DIGIT_1_MIN, rx_buf[13 + 3] % 10);
+				write_reg(MAX_REG_MASK_BOTH | DIGIT_10_SEC, rx_buf[14 + 3] / 10);
+				write_reg(MAX_REG_MASK_BOTH | DIGIT_1_SEC, rx_buf[14 + 3] % 10);
+			} while(0);
+			rx_str_len = 0; // clear the buffer
+			nmea_ready = 0;
+		}
+	} while(timer_value() - start < 2 * F_TICK);
+
 	write_no_sig();
+
+	// Now enable the pps interrupt
+	PMIC.CTRL |= PMIC_MEDLVLEN_bm;
 
 	while(1) {
 		wdt_reset();

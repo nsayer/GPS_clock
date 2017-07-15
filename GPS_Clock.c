@@ -31,7 +31,7 @@
 
 // V3.1 has the two buttons moved to port A to make room for the crystal
 // on pins B0 & B1.
-//#define V31
+#define V31
 
 // Define this if your board uses an 12 MHz crystal instead of the RC oscillator
 //#define XTAL
@@ -242,7 +242,7 @@
 volatile unsigned char disp_buf[8];
 volatile unsigned char rx_buf[RX_BUF_LEN];
 volatile unsigned char rx_str_len;
-volatile unsigned char GPS_ready;
+volatile unsigned char nmea_ready;
 volatile unsigned long last_pps_tick;
 volatile unsigned long tenth_ticks;
 volatile unsigned char gps_locked;
@@ -474,6 +474,8 @@ static inline unsigned char calculateDST(const unsigned char d, const unsigned c
         }
 }
 
+static inline void startLeapCheck();
+
 static inline void handle_time(char h, unsigned char m, unsigned char s, unsigned char dst_flags) {
 	// What we get is the current second. We have to increment it
 	// to represent the *next* second.
@@ -509,6 +511,9 @@ static inline void handle_time(char h, unsigned char m, unsigned char s, unsigne
 		h += dst_offset;
 		if (h >= 24) h -= 24;
 	}
+
+	// Every hour, check to see if the leap second value in the receiver is out-of-date
+	unsigned char doLeapCheck = (m == 30 && s == 0);
 
 	unsigned char am = 0;
 	if (ampm) {
@@ -546,8 +551,43 @@ static inline void handle_time(char h, unsigned char m, unsigned char s, unsigne
 		disp_buf[DIGIT_MISC] |= MASK_COLON_HM | MASK_COLON_MS;
 	}
 #endif
+
+	if (doLeapCheck) startLeapCheck();
 }
 
+static inline void write_msg(const unsigned char *msg, const size_t length) {
+	for(int i = 0; i < length; i++) {
+		while(!(UCSR0A & _BV(UDRE0))) ; // wait for ready
+		UDR0 = msg[i];
+	}
+ }
+ 
+const unsigned char PROGMEM version_msg[] = { 0xa0, 0xa1, 0x00, 0x02, 0x02, 0x01, 0x03, 0x0d, 0x0a };
+static inline void startVersionCheck(void) {
+	// Ask for the firnware version. We expect a 0x80 in response
+	unsigned char msg[sizeof(version_msg)];
+	memcpy_P(msg, version_msg, sizeof(version_msg));
+	write_msg(msg, sizeof(msg));
+}
+
+const unsigned char PROGMEM leap_check_msg[] = { 0xa0, 0xa1, 0x00, 0x02, 0x64, 0x20, 0x44, 0x0d, 0x0a };
+static inline void startLeapCheck(void) {
+	// Ask for the time message. We expect a 0x64-0x8e in response
+	unsigned char msg[sizeof(leap_check_msg)];
+	memcpy_P(msg, leap_check_msg, sizeof(leap_check_msg));
+	write_msg(msg, sizeof(msg));
+}
+
+const unsigned char PROGMEM leap_update_msg[] = { 0xa0, 0xa1, 0x00, 0x04, 0x64, 0x1f, 0x00, 0x01, 0x7a, 0x0d, 0x0a };
+static inline void updateLeapDefault(unsigned char leap_offset) {
+	// This is a set leap-second default message. It will write the given
+	// offset to flash.
+	unsigned char msg[sizeof(leap_update_msg)];
+	memcpy_P(msg, leap_update_msg, sizeof(leap_update_msg));
+	msg[6] = leap_offset;
+	msg[8] ^= leap_offset; // fix the checksum
+	write_msg(msg, sizeof(msg));
+}
 static const char *skip_commas(const char *ptr, const int num) {
 	for(int i = 0; i < num; i++) {
 		ptr = strchr(ptr, ',');
@@ -568,6 +608,21 @@ static unsigned char hexChar(unsigned char c) {
 
 static inline void handleGPS() {
 	unsigned int str_len = rx_str_len; // rx_str_len is where the \0 was written.
+
+	if (str_len >= 3 && rx_buf[0] == 0xa0 && rx_buf[1] == 0xa1) { // binary protocol message
+		unsigned int payloadLength = (((unsigned int)rx_buf[2]) << 8) | rx_buf[3];
+		if (str_len != payloadLength + 5) return; // the A0, A1 bytes, length and checksum are added
+		unsigned int checksum = 0;
+		for(int i = 0; i < payloadLength; i++) checksum ^= rx_buf[i + 4];
+		if (checksum != rx_buf[payloadLength + 4]) return; // checksum mismatch
+		if (rx_buf[4] == 0x64 && rx_buf[5] == 0x8e) {
+			if (!(rx_buf[15 + 3] & (1 << 2))) return; // GPS leap seconds invalid
+			if (rx_buf[13 + 3] == rx_buf[14 + 3]) return; // Current and default agree
+			updateLeapDefault(rx_buf[14 + 3]);
+		} else {
+			return; // unknown binary protocol message
+		}
+	}
  
 	if (str_len < 9) return; // No sentence is shorter than $GPGGA*xx
 	// First, check the checksum of the sentence
@@ -628,12 +683,13 @@ static inline void handleGPS() {
 ISR(USART0_RX_vect) {
 	unsigned char rx_char = UDR0;
  
-	if (GPS_ready) return; // ignore serial until current buffer handled 
-	if (rx_str_len == 0 && rx_char != '$') return; // wait for a "$" to start the line.
+	if (nmea_ready) return; // ignore serial until current buffer handled 
+	if (rx_str_len == 0 && !(rx_char == '$' || rx_char == 0xa0)) return; // wait for a "$" or A0 to start the line.
+
 	rx_buf[rx_str_len] = rx_char;
 	if (rx_char == 0x0d || rx_char == 0x0a) {
 		rx_buf[rx_str_len] = 0; // null terminate
-		GPS_ready = 1;
+		nmea_ready = 1;
 		return;
 	}
 	if (++rx_str_len == RX_BUF_LEN) {
@@ -964,7 +1020,7 @@ static void menu_select() {
 // main() never returns.
 void __ATTR_NORETURN__ main(void) {
 
-	wdt_enable(WDTO_1S);
+	wdt_enable(WDTO_250MS);
 
 	// Leave on only the parts of the chip we use.
 #ifdef V3
@@ -992,7 +1048,7 @@ void __ATTR_NORETURN__ main(void) {
 	UCSR0A = 0;
 #endif
 
-	UCSR0B = _BV(RXCIE0) | _BV(RXEN0); // RX interrupt and RX enable
+	UCSR0B = _BV(RXCIE0) | _BV(RXEN0) | _BV(TXEN0); // RX interrupt and TX+RX enable
 
 	// 8N1
 	UCSR0C = _BV(UCSZ00) | _BV(UCSZ01);
@@ -1003,7 +1059,7 @@ void __ATTR_NORETURN__ main(void) {
 #endif
 
 	rx_str_len = 0;
-	GPS_ready = 0;
+	nmea_ready = 0;
 
 #ifdef V2
 #ifdef V3
@@ -1037,6 +1093,14 @@ void __ATTR_NORETURN__ main(void) {
 	if (dst_mode > DST_MODE_MAX) dst_mode = DST_US;
 	ampm = eeprom_read_byte(EE_AM_PM) != 0;
 
+#ifdef TENTH_DIGIT
+	tenth_enable = eeprom_read_byte(EE_TENTHS) != 0;
+#endif
+#ifdef COLONS
+        colon_state = eeprom_read_byte(EE_COLONS);
+	if (colon_state > COLON_STATE_MAX) colon_state = 1; // default to just on.
+#endif
+
 	gps_locked = 0;
 	menu_pos = 0;
 	debounce_time = 0;
@@ -1050,33 +1114,60 @@ void __ATTR_NORETURN__ main(void) {
 	// Turn off the shut-down register, clear the digit data
 	write_reg(MAX_REG_CONFIG, MAX_REG_CONFIG_R | MAX_REG_CONFIG_B | MAX_REG_CONFIG_S | MAX_REG_CONFIG_E);
 	write_reg(MAX_REG_SCAN_LIMIT, 7); // display all 8 digits
+	write_reg(MAX_REG_DEC_MODE, 0);
 	brightness = (eeprom_read_byte(EE_BRIGHTNESS) & 0xf) | 0x3;
 	write_reg(MAX_REG_INTENSITY, brightness);
-
-#ifdef TENTH_DIGIT
-	tenth_enable = eeprom_read_byte(EE_TENTHS) != 0;
-#endif
-#ifdef COLONS
-        colon_state = eeprom_read_byte(EE_COLONS);
-	if (colon_state > COLON_STATE_MAX) colon_state = 1; // default to just on.
-#endif
 
 	// Turn on the self-test for a second
 	write_reg(MAX_REG_TEST, 1);
 	Delay(1000);
 	write_reg(MAX_REG_TEST, 0);
-	write_no_sig();
+
+	menu_pos = 99; // hack to disable PPS processing
 
 	// Turn on interrupts
 	sei();
 
+	startVersionCheck();
+	unsigned long start = timer_value();
+	do {
+		wdt_reset();
+		if (nmea_ready) {
+			// This do block only exists so we can conveniently break out early.
+			// It's an alternative to a goto.
+			do {
+				unsigned int str_len = rx_str_len; // rx_str_len is where the \0 was written.
+				if (str_len < 5) break; // too short
+				if (rx_buf[0] != 0xa0 || rx_buf[1] != 0xa1) break; // Not a binary msg
+				unsigned int payloadLength = (((unsigned int)rx_buf[2]) << 8) | rx_buf[3];
+				if (str_len != payloadLength + 5) break; // the A0, A1 bytes, length and checksum are added
+				unsigned int checksum = 0;
+				for(int i = 0; i < payloadLength; i++) checksum ^= rx_buf[i + 4];
+				if (checksum != rx_buf[payloadLength + 4]) break; // checksum mismatch
+				if (payloadLength < 14 || rx_buf[4] != 0x80) break; // wrong message
+				write_reg(MAX_REG_DEC_MODE, 0x3f);
+				write_reg(MAX_REG_MASK_BOTH | DIGIT_10_HR, rx_buf[12 + 3] / 10);
+				write_reg(MAX_REG_MASK_BOTH | DIGIT_1_HR, rx_buf[12 + 3] % 10);
+				write_reg(MAX_REG_MASK_BOTH | DIGIT_10_MIN, rx_buf[13 + 3] / 10);
+				write_reg(MAX_REG_MASK_BOTH | DIGIT_1_MIN, rx_buf[13 + 3] % 10);
+				write_reg(MAX_REG_MASK_BOTH | DIGIT_10_SEC, rx_buf[14 + 3] / 10);
+				write_reg(MAX_REG_MASK_BOTH | DIGIT_1_SEC, rx_buf[14 + 3] % 10);
+			} while(0);
+			rx_str_len = 0; // clear the buffer
+			nmea_ready = 0;
+		}
+	} while(timer_value() - start < 2 * F_TICK); // 2 seconds
+	menu_pos = 0; // end-of-hack
+
+	write_no_sig();
+
 	while(1) {
 		wdt_reset();
-		if (GPS_ready) {
+		if (nmea_ready) {
 			// Do this out here so it's not in an interrupt-disabled context.
 			handleGPS();
 			rx_str_len = 0; // now clear the buffer
-			GPS_ready = 0;
+			nmea_ready = 0;
 			continue;
 		}
 		unsigned long local_lpt, now;
