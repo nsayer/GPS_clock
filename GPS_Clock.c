@@ -579,7 +579,7 @@ static inline void startLeapCheck(void) {
 }
 
 const unsigned char PROGMEM leap_update_msg[] = { 0xa0, 0xa1, 0x00, 0x04, 0x64, 0x1f, 0x00, 0x01, 0x7a, 0x0d, 0x0a };
-static inline void updateLeapDefault(unsigned char leap_offset) {
+static inline void updateLeapDefault(const unsigned char leap_offset) {
 	// This is a set leap-second default message. It will write the given
 	// offset to flash.
 	unsigned char msg[sizeof(leap_update_msg)];
@@ -588,6 +588,20 @@ static inline void updateLeapDefault(unsigned char leap_offset) {
 	msg[8] ^= leap_offset; // fix the checksum
 	write_msg(msg, sizeof(msg));
 }
+
+const unsigned char PROGMEM utc_ref_msg[] = { 0xa0, 0xa1, 0x00, 0x08, 0x64, 0x15, 0x01, 0x00, 0x00, 0x00, 0x00, 0x01, 0x71, 0x0d, 0x0a };
+static inline void updateUTCReference(const unsigned int y, const unsigned char mon, const unsigned char d) {
+	// This sets the UTC reference date, which controls the boundaries of the GPS week window
+	unsigned char msg[sizeof(utc_ref_msg)];
+	memcpy_P(msg, utc_ref_msg, sizeof(utc_ref_msg));
+	msg[7] = (unsigned char)(y >> 8);
+	msg[8] = (unsigned char)y;
+	msg[9] = mon;
+	msg[10] = d;
+	for(int i = 7; i <= 10; i++) msg[12] ^= msg[i]; // fix checksum
+	write_msg(msg, sizeof(msg));
+}
+
 static const char *skip_commas(const char *ptr, const int num) {
 	for(int i = 0; i < num; i++) {
 		ptr = strchr(ptr, ',');
@@ -662,6 +676,12 @@ static inline void handleGPS() {
 		// way before then GPS will be obsolete, though.
 		y += 2000;
 		if (y < 2017) y += 100; // As I type this, it's A.D. 2017
+
+		// Every year, on april fool's day at 30 seconds past midnight,
+		// update the UTC reference date in the receiver.
+		if (h == 0 && min == 0 && s == 30 && mon == 4 && d == 1) {
+			updateUTCReference(y, mon, d);
+		}
 
 		// The problem is that our D/M/Y is UTC, but DST decisions are made in the local
 		// timezone. We can adjust the day against standard time midnight, and
