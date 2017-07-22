@@ -82,6 +82,7 @@
 
 // The serial buffer length
 #define RX_BUF_LEN (96)
+#define TX_BUF_LEN (96)
 
 // These are return values from the DST detector routine.
 // DST is not in effect all day
@@ -152,6 +153,8 @@ volatile unsigned char disp_buf[8];
 volatile unsigned char brightness;
 
 volatile unsigned char rx_buf[RX_BUF_LEN];
+volatile unsigned char tx_buf[TX_BUF_LEN];
+volatile unsigned int tx_buf_head, tx_buf_tail;
 volatile unsigned char rx_str_len;
 volatile unsigned char nmea_ready;
 volatile unsigned long last_pps_tick;
@@ -426,10 +429,10 @@ static inline void handle_time(char h, unsigned char m, unsigned char s, unsigne
 	if (doLeapCheck) startLeapCheck();
 }
 
+static inline void tx_char(const unsigned char c);
 static inline void write_msg(const unsigned char *msg, const size_t length) {
 	for(int i = 0; i < length; i++) {
-		while(!(USARTC0.STATUS & USART_DREIF_bm)) ; // wait for ready
-		USARTC0.DATA = msg[i];
+		tx_char(msg[i]);
 	}
 }
 
@@ -589,6 +592,41 @@ ISR(USARTC0_RXC_vect) {
 	}
 }
 
+ISR(USARTC0_DRE_vect) {
+  if (tx_buf_head == tx_buf_tail) {
+    // the transmit queue is empty.
+    USARTC0.CTRLA &= ~USART_DREINTLVL_gm; // disable the TX interrupt.
+    //USARTC0.CTRLA |= USART_DREINTLVL_OFF_gc; // redundant - off is a zero value
+    return;
+  }
+  USARTC0.DATA = tx_buf[tx_buf_tail];
+  if (++tx_buf_tail == TX_BUF_LEN) tx_buf_tail = 0; // point to the next char
+}
+
+// Note that we're only really going to use the transmit side
+// either for diagnostics, or during setup to configure the
+// GPS receiver. If the TX buffer fills up, then this method
+// will block, which should be avoided.
+static inline void tx_char(const unsigned char c) {
+  int buf_in_use;
+  do {
+    ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
+      buf_in_use = tx_buf_head - tx_buf_tail;
+    }
+    if (buf_in_use < 0) buf_in_use += TX_BUF_LEN;
+    wdt_reset(); // we might be waiting a while.
+  } while (buf_in_use >= TX_BUF_LEN - 2) ; // wait for room in the transmit buffer
+
+  tx_buf[tx_buf_head] = c;
+  ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
+    // this needs to be atomic, because an intermediate state is tx_buf_head
+    // pointing *beyond* the end of the buffer.
+    if (++tx_buf_head == TX_BUF_LEN) tx_buf_head = 0; // point to the next free spot in the tx buffer
+  }
+  //USARTC0.CTRLA &= ~USART_DREINTLVL_gm; // this is redundant - it was already 0
+  USARTC0.CTRLA |= USART_DREINTLVL_LO_gc; // enable the TX interrupt. If it was disabled, then it will trigger one now.
+}
+
 static const unsigned char no_sig_data[] PROGMEM = {
 	MASK_C | MASK_E | MASK_G, // n
 	MASK_C | MASK_D | MASK_E | MASK_G, // o
@@ -669,7 +707,7 @@ ISR(TCC5_CCA_vect) {
 
 // This is a precalculated array of 1 << n. The reason for it is that << results
 // in a loop, and this needs to be fast.
-static const unsigned char mask[] PROGMEM = { 0x1, 0x2, 0x4, 0x8, 0x10, 0x20, 0x40, 0x80 };
+static const unsigned char mask[] PROGMEM = { 1 << 0, 1 << 1, 1 << 2, 1 << 3, 1 << 4, 1 << 5, 1 << 6, 1 << 7 };
 
 // This is the high priority display raster handler. We support multiple display brightness
 // by splitting each digit's timeslice up into brightness periods. We turn the digit's
@@ -922,6 +960,7 @@ void __ATTR_NORETURN__ main(void) {
 	PORTC.PIN5CTRL = PORT_OPC_PULLUP_gc;
 
 	rx_str_len = 0;
+	tx_buf_head = tx_buf_tail = 0;
 	nmea_ready = 0;
 
 	// 9600 baud async serial, 8N1, low priority interrupt on receive
