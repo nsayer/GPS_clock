@@ -593,38 +593,35 @@ ISR(USARTC0_RXC_vect) {
 }
 
 ISR(USARTC0_DRE_vect) {
-  if (tx_buf_head == tx_buf_tail) {
-    // the transmit queue is empty.
-    USARTC0.CTRLA &= ~USART_DREINTLVL_gm; // disable the TX interrupt.
-    //USARTC0.CTRLA |= USART_DREINTLVL_OFF_gc; // redundant - off is a zero value
-    return;
-  }
-  USARTC0.DATA = tx_buf[tx_buf_tail];
-  if (++tx_buf_tail == TX_BUF_LEN) tx_buf_tail = 0; // point to the next char
+	if (tx_buf_head == tx_buf_tail) {
+		// the transmit queue is empty.
+		USARTC0.CTRLA &= ~USART_DREINTLVL_gm; // disable the TX interrupt.
+		//USARTC0.CTRLA |= USART_DREINTLVL_OFF_gc; // redundant - off is a zero value
+		return;
+	}
+	USARTC0.DATA = tx_buf[tx_buf_tail];
+	if (++tx_buf_tail == TX_BUF_LEN) tx_buf_tail = 0; // point to the next char
 }
 
-// Note that we're only really going to use the transmit side
-// either for diagnostics, or during setup to configure the
-// GPS receiver. If the TX buffer fills up, then this method
-// will block, which should be avoided.
+// If the TX buffer fills up, then this method will block, which should be avoided.
 static inline void tx_char(const unsigned char c) {
-  int buf_in_use;
-  do {
-    ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
-      buf_in_use = tx_buf_head - tx_buf_tail;
-    }
-    if (buf_in_use < 0) buf_in_use += TX_BUF_LEN;
-    wdt_reset(); // we might be waiting a while.
-  } while (buf_in_use >= TX_BUF_LEN - 2) ; // wait for room in the transmit buffer
+	int buf_in_use;
+	do {
+		ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
+			buf_in_use = tx_buf_head - tx_buf_tail;
+		}
+		if (buf_in_use < 0) buf_in_use += TX_BUF_LEN;
+		wdt_reset(); // we might be waiting a while.
+	} while (buf_in_use >= TX_BUF_LEN - 2) ; // wait for room in the transmit buffer
 
-  tx_buf[tx_buf_head] = c;
-  ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
-    // this needs to be atomic, because an intermediate state is tx_buf_head
-    // pointing *beyond* the end of the buffer.
-    if (++tx_buf_head == TX_BUF_LEN) tx_buf_head = 0; // point to the next free spot in the tx buffer
-  }
-  //USARTC0.CTRLA &= ~USART_DREINTLVL_gm; // this is redundant - it was already 0
-  USARTC0.CTRLA |= USART_DREINTLVL_LO_gc; // enable the TX interrupt. If it was disabled, then it will trigger one now.
+	tx_buf[tx_buf_head] = c;
+	ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
+		// this needs to be atomic, because an intermediate state is tx_buf_head
+		// pointing *beyond* the end of the buffer.
+		if (++tx_buf_head == TX_BUF_LEN) tx_buf_head = 0; // point to the next free spot in the tx buffer
+	}
+	//USARTC0.CTRLA &= ~USART_DREINTLVL_gm; // this is redundant - it was already 0
+	USARTC0.CTRLA |= USART_DREINTLVL_LO_gc; // enable the TX interrupt. If it was disabled, then it will trigger one now.
 }
 
 static const unsigned char no_sig_data[] PROGMEM = {
