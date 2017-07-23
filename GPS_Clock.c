@@ -154,6 +154,7 @@
 #define DIGIT_MISC (7)
 
 #define RX_BUF_LEN (96)
+#define TX_BUF_LEN (24)
 
 #ifdef V31
 #define PORT_SW PINA
@@ -242,6 +243,8 @@
 volatile unsigned char disp_buf[8];
 volatile unsigned char rx_buf[RX_BUF_LEN];
 volatile unsigned char rx_str_len;
+volatile unsigned char tx_buf[TX_BUF_LEN];
+volatile unsigned int tx_buf_head, tx_buf_tail;
 volatile unsigned char nmea_ready;
 volatile unsigned long last_pps_tick;
 volatile unsigned long tenth_ticks;
@@ -555,10 +558,10 @@ static inline void handle_time(char h, unsigned char m, unsigned char s, unsigne
 	if (doLeapCheck) startLeapCheck();
 }
 
+static inline void tx_char(const unsigned char c);
 static inline void write_msg(const unsigned char *msg, const size_t length) {
 	for(int i = 0; i < length; i++) {
-		while(!(UCSR0A & _BV(UDRE0))) ; // wait for ready
-		UDR0 = msg[i];
+		tx_char(msg[i]);
 	}
  }
  
@@ -716,6 +719,36 @@ ISR(USART0_RX_vect) {
 		// The string is too long. Start over.
 		rx_str_len = 0;
 	}
+}
+
+ISR(USART0_UDRE_vect) {
+	if (tx_buf_head == tx_buf_tail) {
+		// the transmit queue is empty.
+		UCSR0B &= ~_BV(UDRIE0); // disable the TX interrupt
+		return;
+	}
+	UDR0 = tx_buf[tx_buf_tail];
+	if (++tx_buf_tail == TX_BUF_LEN) tx_buf_tail = 0; // point to the next char
+}
+
+// If the TX buffer fills up, then this method will block, which should be avoided.
+static inline void tx_char(const unsigned char c) {
+	int buf_in_use;
+	do {
+		ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
+			buf_in_use = tx_buf_head - tx_buf_tail;
+		}
+		if (buf_in_use < 0) buf_in_use += TX_BUF_LEN;
+		wdt_reset(); // we might be waiting a while.
+	} while (buf_in_use >= TX_BUF_LEN - 2) ; // wait for room in the transmit buffer
+
+	tx_buf[tx_buf_head] = c;
+	ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
+		// this needs to be atomic, because an intermediate state is tx_buf_head
+		// pointing *beyond* the end of the buffer.
+		if (++tx_buf_head == TX_BUF_LEN) tx_buf_head = 0; // point to the next free spot in the tx buffer
+	}
+	UCSR0B |= _BV(UDRIE0); // enable the TX interrupt. If it was disabled, then it will trigger one now.
 }
 
 static void write_no_sig() {
@@ -1078,6 +1111,7 @@ void __ATTR_NORETURN__ main(void) {
 	GIMSK = _BV(INT0); // enable INT0
 #endif
 
+	tx_buf_head = tx_buf_tail = 0;
 	rx_str_len = 0;
 	nmea_ready = 0;
 
