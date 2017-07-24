@@ -171,6 +171,9 @@ unsigned char colon_state;
 unsigned long debounce_time;
 unsigned char button_down;
 unsigned long fake_blink;
+unsigned int fw_version_year, utc_ref_year;
+unsigned char fw_version_mon, utc_ref_mon;
+unsigned char fw_version_day, utc_ref_day;
 
 // digit to 7 segment table.
 static const unsigned char character_set[] PROGMEM = {
@@ -463,6 +466,14 @@ static inline void updateLeapDefault(const unsigned char leap_offset) {
 	write_msg(msg, sizeof(msg));
 }
 
+const unsigned char PROGMEM get_utc_ref_msg[] = { 0xa0, 0xa1, 0x00, 0x02, 0x64, 0x16, 0x72, 0x0d, 0x0a };
+static inline void startUTCReferenceFetch() {
+	// This is a request for UTC reference date message. We expect a 0x64-0x8a in response
+	unsigned char msg[sizeof(get_utc_ref_msg)];
+	memcpy_P(msg, get_utc_ref_msg, sizeof(get_utc_ref_msg));
+	write_msg(msg, sizeof(msg));
+}
+
 const unsigned char PROGMEM utc_ref_msg[] = { 0xa0, 0xa1, 0x00, 0x08, 0x64, 0x15, 0x01, 0x00, 0x00, 0x00, 0x00, 0x01, 0x71, 0x0d, 0x0a };
 static inline void updateUTCReference(const unsigned int y, const unsigned char mon, const unsigned char d) {
 	// This sets the UTC reference date, which controls the boundaries of the GPS week window
@@ -494,7 +505,7 @@ static unsigned char hexChar(unsigned char c) {
 	return (unsigned char)(outP - hexes);
 }
 
-static inline void handleGPS() {
+static inline void handleGPS(unsigned char binaryOnly) {
 	unsigned int str_len = rx_str_len; // rx_str_len is where the \0 was written.
 
 	if (str_len >= 3 && rx_buf[0] == 0xa0 && rx_buf[1] == 0xa1) { // binary protocol message
@@ -503,7 +514,15 @@ static inline void handleGPS() {
 		unsigned int checksum = 0;
 		for(int i = 0; i < payloadLength; i++) checksum ^= rx_buf[i + 4];
 		if (checksum != rx_buf[payloadLength + 4]) return; // checksum mismatch
-		if (rx_buf[4] == 0x64 && rx_buf[5] == 0x8e) {
+		if (rx_buf[4] == 0x80) {
+			fw_version_year = rx_buf[12 + 3];
+			fw_version_mon = rx_buf[13 + 3];
+			fw_version_day = rx_buf[14 + 3];
+		} else if (rx_buf[4] == 0x64 && rx_buf[5] == 0x8a) {
+			utc_ref_year = (rx_buf[3 + 4] << 8) | rx_buf[3 + 5];
+			utc_ref_mon = rx_buf[3 + 6];
+			utc_ref_day = rx_buf[3 + 7];
+		} else if (rx_buf[4] == 0x64 && rx_buf[5] == 0x8e) {
 			if (!(rx_buf[15 + 3] & (1 << 2))) return; // GPS leap seconds invalid
 			if (rx_buf[13 + 3] == rx_buf[14 + 3]) return; // Current and default agree
 			updateLeapDefault(rx_buf[14 + 3]);
@@ -511,6 +530,8 @@ static inline void handleGPS() {
 			return; // unknown binary protocol message
 		}
 	}
+
+	if (binaryOnly) return; // we're not handling text sentences.
 
 	if (str_len < 9) return; // No sentence is shorter than $GPGGA*xx
 	// First, check the checksum of the sentence
@@ -537,24 +558,32 @@ static inline void handleGPS() {
 		char h = (ptr[0] - '0') * 10 + (ptr[1] - '0');
 		unsigned char min = (ptr[2] - '0') * 10 + (ptr[3] - '0');
 		unsigned char s = (ptr[4] - '0') * 10 + (ptr[5] - '0');
-		ptr = skip_commas(ptr, 8);
+		ptr = skip_commas(ptr, 1);
+		if (ptr == NULL) return; // not enough commas
+		if (*ptr != 'A') return; // not OK.
+		ptr = skip_commas(ptr, 7);
 		if (ptr == NULL) return; // not enough commas
 		unsigned char d = (ptr[0] - '0') * 10 + (ptr[1] - '0');
 		unsigned char mon = (ptr[2] - '0') * 10 + (ptr[3] - '0');
 		unsigned int y = (ptr[4] - '0') * 10 + (ptr[5] - '0');
 
-		// Y2.1K bug here... We must turn the two digit year into
-		// the actual A.D. year number. As time goes forward, in
-		// principle, we could start deciding that "low" values
-		// get 2100 added instead of 2000. You'd think that
-		// way before then GPS will be obsolete, though.
+		// We must turn the two digit year into the actual A.D. year number.
+		// As time goes forward, we can keep a record of how far time has gotten,
+		// and assume that time will always go forwards. If we see a date ostensibly
+		// in the past, then it "must" mean that we've actually wrapped and need to
+		// add 100 years. We keep this "reference" date in sync with the GPS receiver,
+		// as it uses the reference date to control the GPS week rollover window.
 		y += 2000;
-		if (y < 2017) y += 100; // As I type this, it's A.D. 2017
+		while (y < utc_ref_year) y += 100; // If it's in the "past," assume time wrapped on us.
 
-		// Every year, on april fool's day at 30 seconds past midnight,
-		// update the UTC reference date in the receiver.
-		if (h == 0 && min == 0 && s == 30 && mon == 4 && d == 1) {
+		if (utc_ref_year != 0 && y != utc_ref_year) {
+			// Once a year, we should update the refence date in the receiver. If we're running on New Years,
+			// then that's probably when it will happen, but anytime is really ok. We just don't want to do
+			// it a lot for fear of burning the flash out in the GPS receiver.
 			updateUTCReference(y, mon, d);
+			utc_ref_year = y;
+			utc_ref_mon = mon;
+			utc_ref_day = d;
 		}
 
 		// The problem is that our D/M/Y is UTC, but DST decisions are made in the local
@@ -1041,33 +1070,27 @@ void __ATTR_NORETURN__ main(void) {
 	// turn on the serial interrupt
 	PMIC.CTRL |= PMIC_LOLVLEN_bm;
 
+	fw_version_year = fw_version_mon = fw_version_day = 0;
 	startVersionCheck();
 	start = timer_value();
 	do {
 		wdt_reset();
 		if (nmea_ready) {
-			// This do block only exists so we can conveniently break out early.
-			// It's an alternative to a goto.
-			do {
-				unsigned int str_len = rx_str_len; // rx_str_len is where the \0 was written.
-				if (str_len < 5) break; // too short
-				if (rx_buf[0] != 0xa0 || rx_buf[1] != 0xa1) break; // Not a binary msg
-				unsigned int payloadLength = (((unsigned int)rx_buf[2]) << 8) | rx_buf[3];
-				if (str_len != payloadLength + 5) break; // the A0, A1 bytes, length and checksum are added
-				unsigned int checksum = 0;
-				for(int i = 0; i < payloadLength; i++) checksum ^= rx_buf[i + 4];
-				if (checksum != rx_buf[payloadLength + 4]) break; // checksum mismatch
-				if (payloadLength < 14 || rx_buf[4] != 0x80) break; // wrong message
-				disp_reg[DIGIT_10_HR] = pgm_read_byte(&(character_set[rx_buf[12 + 3] / 10]));
-				disp_reg[DIGIT_1_HR] = pgm_read_byte(&(character_set[rx_buf[12 + 3] % 10]));
-				disp_reg[DIGIT_10_MIN] = pgm_read_byte(&(character_set[rx_buf[13 + 3] / 10]));
-				disp_reg[DIGIT_1_MIN] = pgm_read_byte(&(character_set[rx_buf[13 + 3] % 10]));
-				disp_reg[DIGIT_10_SEC] = pgm_read_byte(&(character_set[rx_buf[14 + 3] / 10]));
-				disp_reg[DIGIT_1_SEC] = pgm_read_byte(&(character_set[rx_buf[14 + 3] % 10]));
-				disp_reg[DIGIT_100_MSEC] = 0;
-			} while(0);
+			handleGPS(1); // binary only handling
 			rx_str_len = 0; // clear the buffer
 			nmea_ready = 0;
+			if (fw_version_year != 0) {
+				disp_reg[DIGIT_10_HR] = pgm_read_byte(&(character_set[fw_version_year / 10]));
+				disp_reg[DIGIT_1_HR] = pgm_read_byte(&(character_set[fw_version_year % 10]));
+				disp_reg[DIGIT_10_MIN] = pgm_read_byte(&(character_set[fw_version_mon / 10]));
+				disp_reg[DIGIT_1_MIN] = pgm_read_byte(&(character_set[fw_version_mon % 10]));
+				disp_reg[DIGIT_10_SEC] = pgm_read_byte(&(character_set[fw_version_day / 10]));
+				disp_reg[DIGIT_1_SEC] = pgm_read_byte(&(character_set[fw_version_day % 10]));
+				disp_reg[DIGIT_100_MSEC] = 0;
+				fw_version_year = 0; // don't come back in here.
+				// we can't "stack" binary commands, so we need to do this after the first finished.
+				startUTCReferenceFetch();
+			}
 		}
 	} while(timer_value() - start < 2 * F_TICK);
 
@@ -1081,7 +1104,7 @@ void __ATTR_NORETURN__ main(void) {
 		if (nmea_ready) {
 			// We're doing this here to get the heavy processing
 			// out of an ISR. It *is* a lot of work, after all.
-			handleGPS();
+			handleGPS(0);
 			rx_str_len = 0; // clear the buffer
 			nmea_ready = 0;
 			continue;
