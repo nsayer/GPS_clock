@@ -32,6 +32,9 @@
 #include <avr/pgmspace.h>
 #include <util/atomic.h>
 
+// If you have a 16 MHz crystal connected up to port R, define this.
+#define XTAL
+
 // 32 MHz
 #define F_CPU (32000000UL)
 
@@ -196,6 +199,12 @@ static const unsigned char character_set[] PROGMEM = {
 	MASK_A | MASK_D | MASK_E | MASK_F | MASK_G, // E
 	MASK_A | MASK_E | MASK_F | MASK_G // F
 };
+
+static inline unsigned char convert_digit(unsigned char val) __attribute__ ((always_inline));
+static inline unsigned char convert_digit(unsigned char val) {
+	if (val >= sizeof(character_set)) return 0;
+	return pgm_read_byte(&(character_set[val]));
+}
 
 static const unsigned char month_tweak[] PROGMEM = {0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4 };
 
@@ -409,14 +418,14 @@ static inline void handle_time(char h, unsigned char m, unsigned char s, unsigne
 		else if (h > 12) h -= 12;
 	}
 
-	disp_buf[DIGIT_1_SEC] = pgm_read_byte(&(character_set[s % 10]));
-	disp_buf[DIGIT_10_SEC] = pgm_read_byte(&(character_set[s / 10]));
-	disp_buf[DIGIT_1_MIN] = pgm_read_byte(&(character_set[m % 10]));
-	disp_buf[DIGIT_10_MIN] = pgm_read_byte(&(character_set[m / 10]));
-	disp_buf[DIGIT_1_HR] = pgm_read_byte(&(character_set[h % 10]));
-	disp_buf[DIGIT_10_HR] = pgm_read_byte(&(character_set[h / 10]));
+	disp_buf[DIGIT_1_SEC] = convert_digit(s % 10);
+	disp_buf[DIGIT_10_SEC] = convert_digit(s / 10);
+	disp_buf[DIGIT_1_MIN] = convert_digit(m % 10);
+	disp_buf[DIGIT_10_MIN] = convert_digit(m / 10);
+	disp_buf[DIGIT_1_HR] = convert_digit(h % 10);
+	disp_buf[DIGIT_10_HR] = convert_digit(h / 10);
 	// no, we do this in the ISR
-	//disp_buf[DIGIT_100_MSEC] = pgm_read_byte(&(character_set[0]));
+	//disp_buf[DIGIT_100_MSEC] = convert_digit(0);
 	disp_buf[DIGIT_MISC] = 0;
 	if (ampm) {
 		// If we are doing 12 hour display and if the 10 hours digit is 0, then blank it instead.
@@ -691,12 +700,14 @@ ISR(TCC5_CCA_vect) {
 	TCC4.INTFLAGS = TC4_CCAIF_bm; // XXX why is this necessary?
 	TCC5.INTFLAGS = TC5_CCAIF_bm;
 
+#ifndef XTAL
 	if (last_pps_tick_good) {
 		// DIY GPS driven FLL for the 32 MHz oscillator.
 		unsigned long pps_tick_count = this_tick - last_pps_tick;
 		if (pps_tick_count < F_CPU) DFLLRC32M.CALA++; // too slow
 		else if (pps_tick_count > F_CPU) DFLLRC32M.CALA--; // too fast
 	}
+#endif
 
 	if (menu_pos == 0 && tenth_enable && last_pps_tick_good) {
 		tenth_ticks = (this_tick - last_pps_tick) / 10;
@@ -721,7 +732,7 @@ ISR(TCC5_CCA_vect) {
 	if (tenth_ticks == 0) {
 		disp_buf[DIGIT_100_MSEC] = 0; // blank
 	} else {
-		disp_buf[DIGIT_100_MSEC] = pgm_read_byte(&(character_set[0]));
+		disp_buf[DIGIT_100_MSEC] = convert_digit(0);
 		disp_buf[DIGIT_1_SEC] |= MASK_DP; // add a decimal point on seconds digit
 	}
 
@@ -731,7 +742,7 @@ ISR(TCC5_CCA_vect) {
 	memcpy((void*)disp_reg, (const void *)disp_buf, sizeof(disp_reg));
 }
 
-// This is a precalculated array of 1 << n. The reason for it is that << results
+// This is a precalculated array of 1 << n. The reason for it is that << (at runtime) results
 // in a loop, and this needs to be fast.
 static const unsigned char mask[] PROGMEM = { 1 << 0, 1 << 1, 1 << 2, 1 << 3, 1 << 4, 1 << 5, 1 << 6, 1 << 7 };
 
@@ -800,8 +811,8 @@ static void menu_render() {
 			if (tz_hour < 0) {
         			disp_reg[3] = MASK_G; // -
 			}
-			disp_reg[4] = pgm_read_byte(&(character_set[abs(tz_hour) / 10]));
-			disp_reg[5] = pgm_read_byte(&(character_set[abs(tz_hour) % 10]));
+			disp_reg[4] = convert_digit(abs(tz_hour) / 10);
+			disp_reg[5] = convert_digit(abs(tz_hour) % 10);
 			break;
 		case 2: // DST on/off
         		disp_reg[0] = MASK_B | MASK_C | MASK_D | MASK_E | MASK_G; // d
@@ -831,14 +842,14 @@ static void menu_render() {
                         }
 			break;
 		case 3: // 12/24 hour
-        		disp_reg[1] = pgm_read_byte(&(character_set[ampm?1:2]));
-        		disp_reg[2] = pgm_read_byte(&(character_set[ampm?2:4]));
+        		disp_reg[1] = convert_digit(ampm?1:2);
+        		disp_reg[2] = convert_digit(ampm?2:4);
         		disp_reg[4] = MASK_C | MASK_E | MASK_F | MASK_G; // h
         		disp_reg[5] = MASK_E | MASK_G; // r
 			break;
 		case 4: // tenths enabled
-			disp_reg[0] = pgm_read_byte(&(character_set[1]));
-			disp_reg[1] = pgm_read_byte(&(character_set[0]));
+			disp_reg[0] = convert_digit(1);
+			disp_reg[1] = convert_digit(0);
 			if (tenth_enable) {
 				disp_reg[3] = MASK_C | MASK_D | MASK_E | MASK_G; // o
 				disp_reg[4] = MASK_C | MASK_E | MASK_G; // n
@@ -940,12 +951,27 @@ static void menu_select() {
 // main() never returns.
 void __ATTR_NORETURN__ main(void) {
 
-	// Run the CPU at 32 MHz.
-	OSC.CTRL = OSC_RC32MEN_bm;
+#ifdef XTAL
+	// We have a 16 MHz crystal. Use the PLL to double that to 32 MHz.
+
+	OSC.XOSCCTRL = OSC_FRQRANGE_12TO16_gc | OSC_XOSCSEL_XTAL_16KCLK_gc;
+	OSC.CTRL |= OSC_XOSCEN_bm;
+	while(!(OSC.STATUS & OSC_XOSCRDY_bm)) ; // wait for it.
+
+	OSC.PLLCTRL = OSC_PLLSRC_XOSC_gc | (2 << OSC_PLLFAC_gp); // PLL from XOSC, mult by 2
+	OSC.CTRL |= OSC_PLLEN_bm;
+	while(!(OSC.STATUS & OSC_PLLRDY_bm)) ; // wait for it.
+
+	_PROTECTED_WRITE(CLK.CTRL, CLK_SCLKSEL_PLL_gc); // switch to it
+	OSC.CTRL &= ~(OSC_RC2MEN_bm); // we're done with the 2 MHz osc.
+#else
+	// Run the CPU at 32 MHz using the RC osc. We'll FLL against GPS later.
+	OSC.CTRL |= OSC_RC32MEN_bm;
 	while(!(OSC.STATUS & OSC_RC32MRDY_bm)) ; // wait for it.
 
 	_PROTECTED_WRITE(CLK.CTRL, CLK_SCLKSEL_RC32M_gc); // switch to it
 	OSC.CTRL &= ~(OSC_RC2MEN_bm); // we're done with the 2 MHz osc.
+#endif
 
 	//wdt_enable(WDTO_1S); // This is broken on XMegas.
 	// This replacement code doesn't disable interrupts (but they're not on now anyway)
@@ -1080,12 +1106,12 @@ void __ATTR_NORETURN__ main(void) {
 			rx_str_len = 0; // clear the buffer
 			nmea_ready = 0;
 			if (fw_version_year != 0) {
-				disp_reg[DIGIT_10_HR] = pgm_read_byte(&(character_set[fw_version_year / 10]));
-				disp_reg[DIGIT_1_HR] = pgm_read_byte(&(character_set[fw_version_year % 10]));
-				disp_reg[DIGIT_10_MIN] = pgm_read_byte(&(character_set[fw_version_mon / 10]));
-				disp_reg[DIGIT_1_MIN] = pgm_read_byte(&(character_set[fw_version_mon % 10]));
-				disp_reg[DIGIT_10_SEC] = pgm_read_byte(&(character_set[fw_version_day / 10]));
-				disp_reg[DIGIT_1_SEC] = pgm_read_byte(&(character_set[fw_version_day % 10]));
+				disp_reg[DIGIT_10_HR] = convert_digit(fw_version_year / 10);
+				disp_reg[DIGIT_1_HR] = convert_digit(fw_version_year % 10);
+				disp_reg[DIGIT_10_MIN] = convert_digit(fw_version_mon / 10);
+				disp_reg[DIGIT_1_MIN] = convert_digit(fw_version_mon % 10);
+				disp_reg[DIGIT_10_SEC] = convert_digit(fw_version_day / 10);
+				disp_reg[DIGIT_1_SEC] = convert_digit(fw_version_day % 10);
 				disp_reg[DIGIT_100_MSEC] = 0;
 				fw_version_year = 0; // don't come back in here.
 				// we can't "stack" binary commands, so we need to do this after the first finished.
@@ -1141,7 +1167,7 @@ void __ATTR_NORETURN__ main(void) {
 				// (should never happen because local_dt would be 9).
 				ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
 					disp_reg[DIGIT_100_MSEC] &= MASK_DP;
-					disp_reg[DIGIT_100_MSEC] |= pgm_read_byte(&(character_set[current_tenth]));
+					disp_reg[DIGIT_100_MSEC] |= convert_digit(current_tenth);
 				}
 			}
 		}
