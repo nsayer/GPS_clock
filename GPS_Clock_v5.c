@@ -33,7 +33,12 @@
 #include <util/atomic.h>
 
 // If you have a 16 MHz crystal connected up to port R, define this.
-#define XTAL
+//#define XTAL
+
+// For the GPS FLL, how much does the frequency have to be off
+// before we fix it? The hardware FLL uses half the calibration
+// step size, which we can guess at.
+#define GPS_FLL_HYST (16000)
 
 // 32 MHz
 #define F_CPU (32000000UL)
@@ -701,11 +706,15 @@ ISR(TCC5_CCA_vect) {
 	TCC5.INTFLAGS = TC5_CCAIF_bm;
 
 #ifndef XTAL
+	// If we have no crystal, we will DFLL in software against GPS.
 	if (last_pps_tick_good) {
 		// DIY GPS driven FLL for the 32 MHz oscillator.
 		unsigned long pps_tick_count = this_tick - last_pps_tick;
-		if (pps_tick_count < F_CPU) DFLLRC32M.CALA++; // too slow
-		else if (pps_tick_count > F_CPU) DFLLRC32M.CALA--; // too fast
+		long diff = ((long)F_CPU) - ((long)pps_tick_count);
+		if (abs(diff) > GPS_FLL_HYST) {
+			if (diff < 0) DFLLRC32M.CALA++; // too slow
+			else if (diff > 0) DFLLRC32M.CALA--; // too fast
+		}
 	}
 #endif
 
@@ -965,7 +974,7 @@ void __ATTR_NORETURN__ main(void) {
 	_PROTECTED_WRITE(CLK.CTRL, CLK_SCLKSEL_PLL_gc); // switch to it
 	OSC.CTRL &= ~(OSC_RC2MEN_bm); // we're done with the 2 MHz osc.
 #else
-	// Run the CPU at 32 MHz using the RC osc. We'll FLL against GPS later.
+	// Run the CPU at 32 MHz using the RC osc. We'll DFLL against GPS later.
 	OSC.CTRL |= OSC_RC32MEN_bm;
 	while(!(OSC.STATUS & OSC_RC32MRDY_bm)) ; // wait for it.
 
@@ -1135,6 +1144,7 @@ void __ATTR_NORETURN__ main(void) {
 			nmea_ready = 0;
 			continue;
 		}
+
 		unsigned long local_lpt, local_tt;
 		unsigned char local_dt, local_lptg;
 		// capture these values atomically so they can't change independently of each other.
