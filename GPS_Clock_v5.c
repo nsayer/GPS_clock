@@ -38,7 +38,7 @@
 // For the GPS FLL, how much does the frequency have to be off
 // before we fix it? The hardware FLL uses half the calibration
 // step size, which we can guess at.
-#define GPS_FLL_HYST (16000)
+#define GPS_FLL_HYST (30000L)
 
 // 32 MHz
 #define F_CPU (32000000UL)
@@ -711,9 +711,9 @@ ISR(TCC5_CCA_vect) {
 		// DIY GPS driven FLL for the 32 MHz oscillator.
 		unsigned long pps_tick_count = this_tick - last_pps_tick;
 		long diff = ((long)F_CPU) - ((long)pps_tick_count);
-		if (abs(diff) > GPS_FLL_HYST) {
-			if (diff < 0) DFLLRC32M.CALA++; // too slow
-			else if (diff > 0) DFLLRC32M.CALA--; // too fast
+		if (labs(diff) > GPS_FLL_HYST) {
+			if (diff > 0) DFLLRC32M.CALA++; // too slow
+			else if (diff < 0) DFLLRC32M.CALA--; // too fast
 		}
 	}
 #endif
