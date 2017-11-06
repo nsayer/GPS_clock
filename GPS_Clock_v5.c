@@ -141,7 +141,6 @@
 // between refresh frequency and brightness granularity.
 #define BRIGHTNESS_LEVELS 4
 
-// disp reg is the "registers" for the disply. It's what's actively being
 // This is the timer frequency - it's the system clock prescaled by 1
 // Keep this synced with the configuration of Timer C4!
 #define F_TICK (F_CPU / 1)
@@ -159,6 +158,7 @@
 // 50 ms worth of system clock.
 #define FAST_PPS_TICKS (F_TICK / 20)
 
+// disp reg is the "registers" for the disply. It's what's actively being
 // displayed right now by the rastering system.
 volatile unsigned char disp_reg[8];
 // disp buf is the buffer where data is prepped for display during the next second.
