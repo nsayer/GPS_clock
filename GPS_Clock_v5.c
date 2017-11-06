@@ -165,12 +165,15 @@ volatile unsigned char disp_reg[8];
 // It's copied into disp_reg by the PPS ISR.
 volatile unsigned char disp_buf[8];
 volatile unsigned char brightness;
+volatile unsigned char current_slot;
+volatile unsigned char bright_step;
 
 volatile unsigned char rx_buf[RX_BUF_LEN];
 volatile unsigned char tx_buf[TX_BUF_LEN];
 volatile unsigned int tx_buf_head, tx_buf_tail;
 volatile unsigned char rx_str_len;
 volatile unsigned char nmea_ready;
+
 volatile unsigned long last_pps_tick;
 volatile unsigned char last_pps_tick_good;
 volatile unsigned long tenth_ticks;
@@ -178,8 +181,6 @@ volatile unsigned char gps_locked;
 volatile unsigned char menu_pos;
 volatile unsigned char tenth_enable;
 volatile unsigned char disp_tenth;
-volatile unsigned char current_slot;
-volatile unsigned char bright_step;
 unsigned char dst_mode;
 unsigned char ampm;
 char tz_hour;
