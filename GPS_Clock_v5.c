@@ -33,7 +33,13 @@
 #include <util/atomic.h>
 
 // If you have a 16 MHz crystal connected up to port R, define this.
-//#define XTAL
+#define XTAL
+
+// If you want to use C7 to measure the PPS ISR latency, define this.
+// C7 will turn high when the PPS ISR completes, and turn low sometime
+// around 500 ms past the second. Use a scope and compare the delta between
+// the rising edge of PPS and the rising edge of C7.
+//#define LATENCY
 
 // For the GPS FLL, how much does the frequency have to be off
 // before we fix it? The hardware FLL uses half the calibration
@@ -172,6 +178,8 @@ volatile unsigned char gps_locked;
 volatile unsigned char menu_pos;
 volatile unsigned char tenth_enable;
 volatile unsigned char disp_tenth;
+volatile unsigned char current_slot;
+volatile unsigned char bright_step;
 unsigned char dst_mode;
 unsigned char ampm;
 char tz_hour;
@@ -387,6 +395,11 @@ static inline void handle_time(char h, unsigned char m, unsigned char s, unsigne
 	if (h >= 24) { h = 0; }
 
 	// Move to local standard time.
+/*
+	// To support half-hour zones, we may have to add 30 minutes
+	if (0) m += 30; // we'd need to make a UI for this somehow
+	while (m >= 60) h++, m -= 60;
+*/
 	h += tz_hour;
 	while (h >= 24) h -= 24;
 	while (h < 0) h += 24;
@@ -519,27 +532,29 @@ static unsigned char hexChar(unsigned char c) {
 	return (unsigned char)(outP - hexes);
 }
 
-static inline void handleGPS(unsigned char binaryOnly) {
-	unsigned int str_len = rx_str_len; // rx_str_len is where the \0 was written.
-
-	if (str_len >= 3 && rx_buf[0] == 0xa0 && rx_buf[1] == 0xa1) { // binary protocol message
-		unsigned int payloadLength = (((unsigned int)rx_buf[2]) << 8) | rx_buf[3];
-		if (str_len != payloadLength + 5) return; // the A0, A1 bytes, length and checksum are added
+static inline void handleGPS(const unsigned char *rx_sentence, const unsigned int str_len, const unsigned char binaryOnly) {
+	if (str_len >= 4 && rx_sentence[0] == 0xa0 && rx_sentence[1] == 0xa1) { // binary protocol message
+		unsigned int payloadLength = (((unsigned int)rx_sentence[2]) << 8) | rx_sentence[3];
+		if (str_len != payloadLength + 5) {
+			return; // the A0, A1 bytes, length and checksum are added
+		}
 		unsigned int checksum = 0;
-		for(int i = 0; i < payloadLength; i++) checksum ^= rx_buf[i + 4];
-		if (checksum != rx_buf[payloadLength + 4]) return; // checksum mismatch
-		if (rx_buf[4] == 0x80) {
-			fw_version_year = rx_buf[12 + 3];
-			fw_version_mon = rx_buf[13 + 3];
-			fw_version_day = rx_buf[14 + 3];
-		} else if (rx_buf[4] == 0x64 && rx_buf[5] == 0x8a) {
-			utc_ref_year = (rx_buf[3 + 4] << 8) | rx_buf[3 + 5];
-			utc_ref_mon = rx_buf[3 + 6];
-			utc_ref_day = rx_buf[3 + 7];
-		} else if (rx_buf[4] == 0x64 && rx_buf[5] == 0x8e) {
-			if (!(rx_buf[15 + 3] & (1 << 2))) return; // GPS leap seconds invalid
-			if (rx_buf[13 + 3] == rx_buf[14 + 3]) return; // Current and default agree
-			updateLeapDefault(rx_buf[14 + 3]);
+		for(int i = 0; i < payloadLength; i++) checksum ^= rx_sentence[i + 4];
+		if (checksum != rx_sentence[payloadLength + 4]) {
+			return; // checksum mismatch
+		}
+		if (rx_sentence[4] == 0x80) {
+			fw_version_year = rx_sentence[12 + 3];
+			fw_version_mon = rx_sentence[13 + 3];
+			fw_version_day = rx_sentence[14 + 3];
+		} else if (rx_sentence[4] == 0x64 && rx_sentence[5] == 0x8a) {
+			utc_ref_year = (rx_sentence[3 + 4] << 8) | rx_sentence[3 + 5];
+			utc_ref_mon = rx_sentence[3 + 6];
+			utc_ref_day = rx_sentence[3 + 7];
+		} else if (rx_sentence[4] == 0x64 && rx_sentence[5] == 0x8e) {
+			if (!(rx_sentence[15 + 3] & (1 << 2))) return; // GPS leap seconds invalid
+			if (rx_sentence[13 + 3] == rx_sentence[14 + 3]) return; // Current and default agree
+			updateLeapDefault(rx_sentence[14 + 3]);
 		} else {
 			return; // unknown binary protocol message
 		}
@@ -552,19 +567,19 @@ static inline void handleGPS(unsigned char binaryOnly) {
 	unsigned char checksum = 0;
 	int i;
 	for(i = 1; i < str_len; i++) {
-		if (rx_buf[i] == '*') break;
-		checksum ^= rx_buf[i];
+		if (rx_sentence[i] == '*') break;
+		checksum ^= rx_sentence[i];
 	}
 	if (i > str_len - 3) {
 		return; // there has to be room for the "*" and checksum.
 	}
 	i++; // skip the *
-	unsigned char sent_checksum = (hexChar(rx_buf[i]) << 4) | hexChar(rx_buf[i + 1]);
+	unsigned char sent_checksum = (hexChar(rx_sentence[i]) << 4) | hexChar(rx_sentence[i + 1]);
 	if (sent_checksum != checksum) {
 		return; // bad checksum.
 	}
 	  
-	const char *ptr = (char *)rx_buf;
+	const char *ptr = (char *)rx_sentence;
 	if (!strncmp_P(ptr, PSTR("$GPRMC"), 6)) {
 		// $GPRMC,172313.000,A,xxxx.xxxx,N,xxxxx.xxxx,W,0.01,180.80,260516,,,D*74\x0d\x0a
 		ptr = skip_commas(ptr, 1);
@@ -664,7 +679,7 @@ static inline void tx_char(const unsigned char c) {
 		if (++tx_buf_head == TX_BUF_LEN) tx_buf_head = 0; // point to the next free spot in the tx buffer
 	}
 	//USARTC0.CTRLA &= ~USART_DREINTLVL_gm; // this is redundant - it was already 0
-	USARTC0.CTRLA |= USART_DREINTLVL_LO_gc; // enable the TX interrupt. If it was disabled, then it will trigger one now.
+	USARTC0.CTRLA |= USART_DREINTLVL_MED_gc; // enable the TX interrupt. If it was disabled, then it will trigger one now.
 }
 
 static const unsigned char no_sig_data[] PROGMEM = {
@@ -697,6 +712,12 @@ static inline unsigned long timer_value() {
 	TCC4.INTFLAGS = TC4_CCBIF_bm; // XXX why is this necessary?
 	TCC5.INTFLAGS = TC5_CCBIF_bm;
 	return out;
+}
+
+static inline void reset_raster(void) {
+	ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
+		bright_step = current_slot = 0;
+	}
 }
 
 ISR(TCC5_CCA_vect) {
@@ -749,32 +770,34 @@ ISR(TCC5_CCA_vect) {
 
 	// Copy the display buffer data into the display.
 	memcpy((void*)disp_reg, (const void *)disp_buf, sizeof(disp_reg));
+	reset_raster();
+#ifdef LATENCY
+	PORTC.OUTSET = _BV(7);
+#endif
 }
 
 // This is a precalculated array of 1 << n. The reason for it is that << (at runtime) results
 // in a loop, and this needs to be fast.
 static const unsigned char mask[] PROGMEM = { 1 << 0, 1 << 1, 1 << 2, 1 << 3, 1 << 4, 1 << 5, 1 << 6, 1 << 7 };
 
-// This is the high priority display raster handler. We support multiple display brightness
-// by splitting each digit's timeslice up into brightness periods. We turn the digit's
-// segments on at the start and off early depending on the configured setting.
+// This is the display raster handler. We loop through four brightness levels and the 8 display
+// digits. For each digit, we use two interrupt slots - one to display that digit, and the other
+// as a dead-time immediately after to allow the high-side switch to turn off (not doing this
+// causes digit ghosting). When the display is dimmed, then we turn the display completely off
+// for some of the passes through the digits.
 ISR(TCD5_OVF_vect) {
-	static unsigned char current_digit;
-	static unsigned char bright_step;
 	TCD5.INTFLAGS = TC5_OVFIF_bm; // ack the interrupt
-	if (++bright_step >= BRIGHTNESS_LEVELS) {
-		bright_step = 0;
-		// time to change digits
-		if (++current_digit >= sizeof(mask)) current_digit = 0;
-		DIGIT_VAL_REG = 0; // At max brightness, must turn off previous digit..
-		for(int i = 0; i < 10; i++) // and waste a little bit of time (the driver chip needs at least 2 us)
-			_NOP();
-		DIGIT_SEL_REG = pgm_read_byte(&(mask[current_digit])); // This is (1 << current_digit)
-		DIGIT_VAL_REG = disp_reg[current_digit]; // Light up the segments
-	} else {
-		if (bright_step > brightness)
-			DIGIT_VAL_REG = 0; // turn the outputs off for the rest of this character's timeslot.
+	DIGIT_VAL_REG = 0; // turn off the value digits first.
+	if (++current_slot >= (sizeof(mask) << 1)) {
+		current_slot = 0;
+		if (++bright_step >= BRIGHTNESS_LEVELS)
+			bright_step = 0;
 	}
+	if (current_slot & 1) return; // this is the dead slot after the digit
+	if (bright_step > brightness) return; // This pass is full-off due to dimming.
+	unsigned char current_digit = current_slot >> 1;
+	DIGIT_SEL_REG = pgm_read_byte(&(mask[current_digit])); // This is (1 << current_digit)
+	DIGIT_VAL_REG = disp_reg[current_digit]; // Light up the segments
 }
 
 static unsigned char check_buttons() {
@@ -951,7 +974,7 @@ static void menu_select() {
 			if (++colon_state > COLON_STATE_MAX) colon_state = 0;
 			break;
 		case 6: // brightness
-			brightness = (brightness + 1) & 0x3; // 0-3
+			if (++brightness >= BRIGHTNESS_LEVELS) brightness = 0;
 			break;
 	}
 	menu_render();
@@ -1012,6 +1035,10 @@ void __ATTR_NORETURN__ main(void) {
 
 	PORTC.OUTSET = _BV(3); // TXD defaults to high, but we really don't use it anyway
 	PORTC.DIRSET = _BV(3); // TXD is an output.
+#ifdef LATENCY
+	PORTC.OUTCLR = _BV(7);
+	PORTC.DIRSET = _BV(7);
+#endif
 
 	// Send an event on the rising edge of PPS.
 	PORTC.PIN0CTRL = PORT_ISC_RISING_gc;
@@ -1025,7 +1052,7 @@ void __ATTR_NORETURN__ main(void) {
 	nmea_ready = 0;
 
 	// 9600 baud async serial, 8N1, low priority interrupt on receive
-	USARTC0.CTRLA = USART_DRIE_bm | USART_RXCINTLVL_LO_gc;
+	USARTC0.CTRLA = USART_DRIE_bm | USART_RXCINTLVL_MED_gc;
 	USARTC0.CTRLB = USART_RXEN_bm | USART_TXEN_bm;
 	USARTC0.CTRLC = USART_CHSIZE_8BIT_gc;
 	USARTC0.CTRLD = 0;
@@ -1047,7 +1074,7 @@ void __ATTR_NORETURN__ main(void) {
 	TCC5.CTRLD = TC5_EVDLY_bm | TC45_EVSEL_CH0_gc; // We're cascading 32 bits - we must delay capture events 1 cycle
 	TCC5.CTRLE = TC45_CCBMODE_CAPT_gc | TC45_CCAMODE_CAPT_gc;
 	TCC5.INTCTRLA = 0;
-	TCC5.INTCTRLB = TC45_CCAINTLVL_MED_gc;
+	TCC5.INTCTRLB = TC45_CCAINTLVL_HI_gc;
 
 	// TCD5 is the timer for the display refresh. Its overflow triggers the rastering ISR.
 	// A rastering rate of 10 kHz means a display latency of 100 microseconds, but it also
@@ -1057,7 +1084,7 @@ void __ATTR_NORETURN__ main(void) {
 	TCD5.CTRLC = 0;
 	TCD5.CTRLD = 0;
 	TCD5.CTRLE = 0;
-	TCD5.INTCTRLA = TC45_OVFINTLVL_HI_gc;
+	TCD5.INTCTRLA = TC45_OVFINTLVL_LO_gc;
 	TCD5.INTCTRLB = 0;
 	TCD5.PER = REFRESH_PERIOD;
 
@@ -1084,7 +1111,8 @@ void __ATTR_NORETURN__ main(void) {
 	fake_blink = 0;
 
 	// Turn on just the display refresh interrupt to start with
-	PMIC.CTRL = PMIC_HILVLEN_bm;
+	reset_raster();
+	PMIC.CTRL = PMIC_LOLVLEN_bm;
 	sei();
 
 	// Turn on the self-test for a second
@@ -1103,7 +1131,7 @@ void __ATTR_NORETURN__ main(void) {
 	memset((void*)disp_reg, 0, sizeof(disp_reg));
 
 	// turn on the serial interrupt
-	PMIC.CTRL |= PMIC_LOLVLEN_bm;
+	PMIC.CTRL |= PMIC_MEDLVLEN_bm;
 
 	fw_version_year = fw_version_mon = fw_version_day = 0;
 	startVersionCheck();
@@ -1111,9 +1139,12 @@ void __ATTR_NORETURN__ main(void) {
 	do {
 		wdt_reset();
 		if (nmea_ready) {
-			handleGPS(1); // binary only handling
+			unsigned char temp_buf[RX_BUF_LEN];
+			unsigned int temp_len = rx_str_len;
+			memcpy(temp_buf, (const char *)rx_buf, temp_len);
 			rx_str_len = 0; // clear the buffer
 			nmea_ready = 0;
+			handleGPS(temp_buf, temp_len, 1); // binary only handling
 			if (fw_version_year != 0) {
 				disp_reg[DIGIT_10_HR] = convert_digit(fw_version_year / 10);
 				disp_reg[DIGIT_1_HR] = convert_digit(fw_version_year % 10);
@@ -1130,7 +1161,7 @@ void __ATTR_NORETURN__ main(void) {
 	} while(timer_value() - start < 2 * F_TICK);
 
 	// turn on the PPS interrupt
-	PMIC.CTRL |= PMIC_MEDLVLEN_bm;
+	PMIC.CTRL |= PMIC_HILVLEN_bm;
 
 	write_no_sig();
 
@@ -1139,9 +1170,14 @@ void __ATTR_NORETURN__ main(void) {
 		if (nmea_ready) {
 			// We're doing this here to get the heavy processing
 			// out of an ISR. It *is* a lot of work, after all.
-			handleGPS(0);
+			// But this may take a long time, so we need to let
+			// the serial ISR keep working.
+			unsigned char temp_buf[RX_BUF_LEN];
+			unsigned int temp_len = rx_str_len;
+			memcpy(temp_buf, (const char *)rx_buf, temp_len);
 			rx_str_len = 0; // clear the buffer
 			nmea_ready = 0;
+			handleGPS(temp_buf, temp_len, 0);
 			continue;
 		}
 
@@ -1178,7 +1214,11 @@ void __ATTR_NORETURN__ main(void) {
 				ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
 					disp_reg[DIGIT_100_MSEC] &= MASK_DP;
 					disp_reg[DIGIT_100_MSEC] |= convert_digit(current_tenth);
+					reset_raster();
 				}
+#ifdef LATENCY
+				if (current_tenth == 5) PORTC.OUTCLR = _BV(7);
+#endif
 			}
 		}
 		if (fake_blink) {
