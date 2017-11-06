@@ -158,10 +158,10 @@
 // 50 ms worth of system clock.
 #define FAST_PPS_TICKS (F_TICK / 20)
 
-// disp reg is the "registers" for the disply. It's what's actively being
+// disp_reg is the "registers" for the display. It's what's actively being
 // displayed right now by the rastering system.
 volatile unsigned char disp_reg[8];
-// disp buf is the buffer where data is prepped for display during the next second.
+// disp_buf is the buffer where data is prepped for display during the next second.
 // It's copied into disp_reg by the PPS ISR.
 volatile unsigned char disp_buf[8];
 volatile unsigned char brightness;
