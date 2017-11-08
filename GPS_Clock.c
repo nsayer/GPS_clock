@@ -689,7 +689,7 @@ static inline void handleGPS(unsigned char binaryOnly) {
 		unsigned char s = (ptr[4] - '0') * 10 + (ptr[5] - '0');
 		ptr = skip_commas(ptr, 1);
 		if (ptr == NULL) return; // not enough commas
-		if (*ptr != 'A') return; // not OK.
+		gps_locked = *ptr != 'A'; // A = AOK
 		ptr = skip_commas(ptr, 7);
 		if (ptr == NULL) return; // not enough commas
 		unsigned char d = (ptr[0] - '0') * 10 + (ptr[1] - '0');
@@ -724,11 +724,6 @@ static inline void handleGPS(unsigned char binaryOnly) {
 		if (h + tz_hour > 23) d++;
 		unsigned char dst_flags = calculateDST(d, mon, y);
 		handle_time(h, min, s, dst_flags);
-	} else if (!strncmp_P(ptr, PSTR("$GPGSA"), 6)) {
-		// $GPGSA,A,3,02,06,12,24,25,29,,,,,,,1.61,1.33,0.90*01
-		ptr = skip_commas(ptr, 2);
-		if (ptr == NULL) return; // not enough commas
-		gps_locked = (*ptr == '3' || *ptr == '2');
 	}
 }
 
