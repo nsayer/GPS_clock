@@ -130,12 +130,31 @@
 #define EE_TENTHS ((uint8_t*)4)
 #define EE_COLONS ((uint8_t*)5)
 
-// The refresh rate is F_CPU / (BRIGHTNESS_LEVELS * digit_count * REFRESH_PERIOD). REFRESH_PERIOD is
-// a tradeoff between refresh rate (which is also directly tied to the display accuracy) and the
-// amount of CPU left to actually run the clock.
+// The refresh rate is F_CPU / (digit_count * REFRESH_PERIOD). Different levels
+// of brightness are achieved by lighting n out of every m (BRIGHTNESS_LEVELS)
+// raster intervals.
 //
-// 10 kHz refresh rate - 4 interrupts per digit (brightness), 8 digits, 32 MHz freq.
-#define REFRESH_PERIOD (100)
+// We maintain the clock's display accuracy by resetting the raster cycle to
+// the beginning after "important" display updates (specifically the time).
+// This means that worst case display latency for the time is one raster cycle,
+// or (for 10 kHz) 100 microseconds. The good news, however, is that since we
+// reset the raster cycle, we wind up displaying the least significant digits
+// immediately, which means the *real* accuracy is much better than worst-case.
+//
+// The high side switch requires 2 microseconds of turn-off time. To achieve
+// this, we alternate between long and short interrupt intervals. The short
+// intervals are chosen to be the turn-off time and the long intervals
+// is a tradeoff between refresh rate (which is also directly tied to the display
+// accuracy) and the duty cycle of the display (which impacts the resulting brightness).
+//
+// 2 microseconds is actually 64 counts, but that's quicker than the ISR itself,
+// so we have to stretch it out a bit. This has implications for how short the
+// REFRESH_PERIOD can be, because - again - it impacts the brightness.
+//
+// 10 kHz refresh rate - 8 digits, 32 MHz freq, 400 counts per digit.
+#define REFRESH_PERIOD (400)
+#define REFRESH_PERIOD_SHORT (100)
+#define REFRESH_PERIOD_LONG (REFRESH_PERIOD-REFRESH_PERIOD_SHORT)
 
 // How many brightness levels do we support? This is a tradeoff
 // between refresh frequency and brightness granularity.
@@ -675,7 +694,7 @@ static inline void tx_char(const unsigned char c) {
 		if (++tx_buf_head == TX_BUF_LEN) tx_buf_head = 0; // point to the next free spot in the tx buffer
 	}
 	//USARTC0.CTRLA &= ~USART_DREINTLVL_gm; // this is redundant - it was already 0
-	USARTC0.CTRLA |= USART_DREINTLVL_MED_gc; // enable the TX interrupt. If it was disabled, then it will trigger one now.
+	USARTC0.CTRLA |= USART_DREINTLVL_LO_gc; // enable the TX interrupt. If it was disabled, then it will trigger one now.
 }
 
 static const unsigned char no_sig_data[] PROGMEM = {
@@ -789,7 +808,11 @@ ISR(TCD5_OVF_vect) {
 		if (++bright_step >= BRIGHTNESS_LEVELS)
 			bright_step = 0;
 	}
-	if (current_slot & 1) return; // this is the dead slot after the digit
+	if (current_slot & 1) {
+		TCD5.PER = REFRESH_PERIOD_SHORT;
+		return; // this is the dead slot after the digit
+	}
+	TCD5.PER = REFRESH_PERIOD_LONG;
 	if (bright_step > brightness) return; // This pass is full-off due to dimming.
 	unsigned char current_digit = current_slot >> 1;
 	DIGIT_SEL_REG = pgm_read_byte(&(mask[current_digit])); // This is (1 << current_digit)
@@ -1048,7 +1071,7 @@ void __ATTR_NORETURN__ main(void) {
 	nmea_ready = 0;
 
 	// 9600 baud async serial, 8N1, low priority interrupt on receive
-	USARTC0.CTRLA = USART_DRIE_bm | USART_RXCINTLVL_MED_gc;
+	USARTC0.CTRLA = USART_DRIE_bm | USART_RXCINTLVL_LO_gc;
 	USARTC0.CTRLB = USART_RXEN_bm | USART_TXEN_bm;
 	USARTC0.CTRLC = USART_CHSIZE_8BIT_gc;
 	USARTC0.CTRLD = 0;
@@ -1070,7 +1093,7 @@ void __ATTR_NORETURN__ main(void) {
 	TCC5.CTRLD = TC5_EVDLY_bm | TC45_EVSEL_CH0_gc; // We're cascading 32 bits - we must delay capture events 1 cycle
 	TCC5.CTRLE = TC45_CCBMODE_CAPT_gc | TC45_CCAMODE_CAPT_gc;
 	TCC5.INTCTRLA = 0;
-	TCC5.INTCTRLB = TC45_CCAINTLVL_HI_gc;
+	TCC5.INTCTRLB = TC45_CCAINTLVL_MED_gc;
 
 	// TCD5 is the timer for the display refresh. Its overflow triggers the rastering ISR.
 	// A rastering rate of 10 kHz means a display latency of 100 microseconds, but it also
@@ -1080,9 +1103,9 @@ void __ATTR_NORETURN__ main(void) {
 	TCD5.CTRLC = 0;
 	TCD5.CTRLD = 0;
 	TCD5.CTRLE = 0;
-	TCD5.INTCTRLA = TC45_OVFINTLVL_LO_gc;
+	TCD5.INTCTRLA = TC45_OVFINTLVL_HI_gc;
 	TCD5.INTCTRLB = 0;
-	TCD5.PER = REFRESH_PERIOD;
+	TCD5.PER = REFRESH_PERIOD_LONG;
 
 	unsigned char ee_rd = eeprom_read_byte(EE_TIMEZONE);
 	if (ee_rd == 0xff)
@@ -1108,7 +1131,7 @@ void __ATTR_NORETURN__ main(void) {
 
 	// Turn on just the display refresh interrupt to start with
 	reset_raster();
-	PMIC.CTRL = PMIC_LOLVLEN_bm;
+	PMIC.CTRL = PMIC_HILVLEN_bm;
 	sei();
 
 	// Turn on the self-test for a second
@@ -1127,7 +1150,7 @@ void __ATTR_NORETURN__ main(void) {
 	memset((void*)disp_reg, 0, sizeof(disp_reg));
 
 	// turn on the serial interrupt
-	PMIC.CTRL |= PMIC_MEDLVLEN_bm;
+	PMIC.CTRL |= PMIC_LOLVLEN_bm;
 
 	fw_version_year = fw_version_mon = fw_version_day = 0;
 	startVersionCheck();
@@ -1157,7 +1180,7 @@ void __ATTR_NORETURN__ main(void) {
 	} while(timer_value() - start < 2 * F_TICK);
 
 	// turn on the PPS interrupt
-	PMIC.CTRL |= PMIC_HILVLEN_bm;
+	PMIC.CTRL |= PMIC_MEDLVLEN_bm;
 
 	write_no_sig();
 
