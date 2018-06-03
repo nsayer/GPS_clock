@@ -689,7 +689,7 @@ static inline void handleGPS(unsigned char binaryOnly) {
 		unsigned char s = (ptr[4] - '0') * 10 + (ptr[5] - '0');
 		ptr = skip_commas(ptr, 1);
 		if (ptr == NULL) return; // not enough commas
-		gps_locked = *ptr != 'A'; // A = AOK
+		gps_locked = *ptr == 'A'; // A = AOK
 		ptr = skip_commas(ptr, 7);
 		if (ptr == NULL) return; // not enough commas
 		unsigned char d = (ptr[0] - '0') * 10 + (ptr[1] - '0');
