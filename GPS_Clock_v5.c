@@ -554,8 +554,8 @@ static unsigned char hexChar(unsigned char c) {
 
 static inline void handleGPS(const unsigned char *rx_sentence, const unsigned int str_len, const unsigned char binaryOnly) {
 	if (str_len >= 4 && rx_sentence[0] == 0xa0 && rx_sentence[1] == 0xa1) { // binary protocol message
-		unsigned int payloadLength = (((unsigned int)rx_sentence[2]) << 8) | rx_sentence[3];
-		if (str_len != payloadLength + 5) {
+		unsigned int payloadLength = (((unsigned int)rx_sentence[2]) << 8) + rx_sentence[3];
+		if (str_len != payloadLength + 7) {
 			return; // the A0, A1 bytes, length and checksum are added
 		}
 		unsigned int checksum = 0;
@@ -653,15 +653,22 @@ ISR(USARTC0_RXC_vect) {
  
 	if (nmea_ready) return; // ignore serial until the buffer is handled 
 	if (rx_str_len == 0 && !(rx_char == '$' || rx_char == 0xa0)) return; // wait for a "$" or A0 to start the line.
-	rx_buf[rx_str_len] = rx_char;
-	if (rx_char == 0x0d || rx_char == 0x0a) {
+
+	rx_buf[rx_str_len++] = rx_char;
+
+	if (rx_str_len == RX_BUF_LEN) {
+		// The string is too long. Start over.
+		rx_str_len = 0;
+		return;
+	}
+
+	// If it's an ASCII message, then it's ended with a CRLF.
+	// If it's a binary message, then it's ended when it's the correct length
+	if ( (rx_buf[0] == '$' && (rx_char == 0x0d || rx_char == 0x0a)) ||
+		(rx_buf[0] == 0xa0 && rx_str_len >= 4 && rx_str_len >= ((rx_buf[2] << 8) + rx_buf[3] + 7)) ) {
 		rx_buf[rx_str_len] = 0; // null terminate
 		nmea_ready = 1; // Mark it as ready
 		return;
-	}
-	if (++rx_str_len == RX_BUF_LEN) {
-		// The string is too long. Start over.
-		rx_str_len = 0;
 	}
 }
 
