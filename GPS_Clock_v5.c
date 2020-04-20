@@ -98,6 +98,16 @@
 #define RX_BUF_LEN (96)
 #define TX_BUF_LEN (96)
 
+// The menu list
+#define MENU_OFF    (0)
+#define MENU_SNR    (1)
+#define MENU_ZONE   (2)
+#define MENU_DST    (3)
+#define MENU_AMPM   (4)
+#define MENU_10TH   (5)
+#define MENU_COLON  (6)
+#define MENU_BRIGHT (7)
+
 // These are return values from the DST detector routine.
 // DST is not in effect all day
 #define DST_NO 0
@@ -177,6 +187,9 @@
 // 50 ms worth of system clock.
 #define FAST_PPS_TICKS (F_TICK / 20)
 
+// How many satellite SNRs are we willing to track (from GPGSV)?
+#define MAX_SAT (12)
+
 // disp_reg is the "registers" for the display. It's what's actively being
 // displayed right now by the rastering system.
 volatile unsigned char disp_reg[8];
@@ -197,6 +210,9 @@ volatile unsigned long last_pps_tick;
 volatile unsigned char last_pps_tick_good;
 volatile unsigned long tenth_ticks;
 volatile unsigned char gps_locked;
+volatile unsigned char sat_snr[MAX_SAT];
+volatile unsigned char sat_count;
+volatile unsigned char sat_fix_count;
 volatile unsigned char menu_pos;
 volatile unsigned char tenth_enable;
 volatile unsigned char disp_tenth;
@@ -600,7 +616,26 @@ static inline void handleGPS(const unsigned char *rx_sentence, const unsigned in
 	}
 	  
 	const char *ptr = (char *)rx_sentence;
-	if (!strncmp_P(ptr, PSTR("$GPRMC"), 6)) {
+	if (!strncmp_P(ptr, PSTR("$GPGSA"), 6)) {
+		ptr = skip_commas(ptr, 3);
+		// count the number of satellites used for fix
+		sat_fix_count = 0;
+		for(int i = 0; i < 12; i++) {
+			if (ptr[0] != ',') sat_fix_count++;
+			ptr = skip_commas(ptr, 1);
+		}
+	} else if (!strncmp_P(ptr, PSTR("$GPGSV"), 6)) {
+		ptr = skip_commas(ptr, 2);
+		unsigned char msg_num = (unsigned char)atoi(ptr);
+		ptr = skip_commas(ptr, 1);
+		sat_count = (unsigned char)atoi(ptr);
+		if (sat_count > MAX_SAT) sat_count = MAX_SAT;
+		for(int i = 0; i < 3; i++) {
+			ptr = skip_commas(ptr, 4);
+			if ((i + msg_num * 4) > MAX_SAT) break;
+			sat_snr[i + msg_num * 4] = (unsigned char)atoi(ptr);
+		}
+	} else if (!strncmp_P(ptr, PSTR("$GPRMC"), 6)) {
 		// $GPRMC,172313.000,A,xxxx.xxxx,N,xxxxx.xxxx,W,0.01,180.80,260516,,,D*74\x0d\x0a
 		ptr = skip_commas(ptr, 1);
 		if (ptr == NULL) return; // not enough commas
@@ -857,13 +892,26 @@ static void menu_render() {
 	// blank the display
 	memset((void*)disp_reg, 0, sizeof(disp_reg));
 	switch(menu_pos) {
-		case 0:
+		case MENU_OFF:
 			// we're returning to time mode. Either leave it blank or indicate no signal.
 			if (!gps_locked)
 				write_no_sig();
 			tenth_ticks = 0;
 			break;
-		case 1: // zone
+		case MENU_SNR: // SNR
+			{
+				unsigned char max_snr = 0;
+				for (int i = 0; i < sat_count; i++)
+					if (max_snr < sat_snr[i]) max_snr = sat_snr[i];
+				disp_reg[0] = MASK_C | MASK_E | MASK_G; // n
+				disp_reg[1] = convert_digit(sat_count);
+				disp_reg[3] = MASK_A | MASK_C | MASK_D | MASK_F | MASK_G; // S
+				disp_reg[4] = convert_digit(max_snr / 10);
+				disp_reg[5] = convert_digit(max_snr % 10);
+				disp_reg[6] = convert_digit(sat_fix_count % 10);
+			}
+			break;
+		case MENU_ZONE: // zone
         		disp_reg[0] = MASK_D | MASK_E | MASK_F | MASK_G; // t
         		disp_reg[1] = MASK_C | MASK_E | MASK_F | MASK_G; // h
 			if (tz_hour < 0) {
@@ -872,7 +920,7 @@ static void menu_render() {
 			disp_reg[4] = convert_digit(abs(tz_hour) / 10);
 			disp_reg[5] = convert_digit(abs(tz_hour) % 10);
 			break;
-		case 2: // DST on/off
+		case MENU_DST: // DST on/off
         		disp_reg[0] = MASK_B | MASK_C | MASK_D | MASK_E | MASK_G; // d
         		disp_reg[1] = MASK_A | MASK_C | MASK_D | MASK_F | MASK_G; // S
 			switch(dst_mode) {
@@ -899,13 +947,13 @@ static void menu_render() {
                                         break;
                         }
 			break;
-		case 3: // 12/24 hour
+		case MENU_AMPM: // 12/24 hour
         		disp_reg[1] = convert_digit(ampm?1:2);
         		disp_reg[2] = convert_digit(ampm?2:4);
         		disp_reg[4] = MASK_C | MASK_E | MASK_F | MASK_G; // h
         		disp_reg[5] = MASK_E | MASK_G; // r
 			break;
-		case 4: // tenths enabled
+		case MENU_10TH: // tenths enabled
 			disp_reg[0] = convert_digit(1);
 			disp_reg[1] = convert_digit(0);
 			if (tenth_enable) {
@@ -917,7 +965,7 @@ static void menu_render() {
 				disp_reg[5] = MASK_A | MASK_E | MASK_F | MASK_G; // F
 			}
 			break;
-		case 5: // colons enabled
+		case MENU_COLON: // colons enabled
         		disp_reg[0] = MASK_A | MASK_D | MASK_E | MASK_F; // C
         		disp_reg[1] = MASK_C | MASK_D | MASK_E | MASK_G; // o
         		disp_reg[2] = MASK_D | MASK_E | MASK_F; // L
@@ -940,7 +988,7 @@ static void menu_render() {
 					break;
 			}
 			break;
-		case 6: // brightness
+		case MENU_BRIGHT: // brightness
         		disp_reg[0] = MASK_C | MASK_D | MASK_E | MASK_F | MASK_G; // b
         		disp_reg[1] = MASK_E | MASK_G; // r
         		disp_reg[2] = MASK_B | MASK_C; // I
@@ -953,53 +1001,56 @@ static void menu_render() {
 
 static void menu_set() {
 	switch(menu_pos) {
-		case 0:
+		case MENU_OFF:
 			// we're entering the menu system. Disable the tenth digit.
 			tenth_ticks = 0;
 			break;
-		case 1:
+		case MENU_SNR:
+			break;
+		case MENU_ZONE:
 			eeprom_write_byte(EE_TIMEZONE, tz_hour + 12);
 			break;
-		case 2:
+		case MENU_DST:
 			eeprom_write_byte(EE_DST_MODE, dst_mode);
 			break;
-		case 3:
+		case MENU_AMPM:
 			eeprom_write_byte(EE_AM_PM, ampm);
 			break;
-		case 4:
+		case MENU_10TH:
 			eeprom_write_byte(EE_TENTHS, tenth_enable);
 			break;
-		case 5:
+		case MENU_COLON:
 			fake_blink = 0; // We're done with that nonsense
 			eeprom_write_byte(EE_COLONS, colon_state);
 			break;
-		case 6:
+		case MENU_BRIGHT:
 			eeprom_write_byte(EE_BRIGHTNESS, brightness);
 			break;
 	}
-	if (++menu_pos > 6) menu_pos = 0;
+	if (++menu_pos > MENU_BRIGHT) menu_pos = 0;
 	menu_render();
 }
 
 static void menu_select() {
 	switch(menu_pos) {
-		case 0: return; // ignore SET when just running
-		case 1: // timezone
+		case 0: return; // ignore SELECT when just running
+		case 1: return; // ignore SELECT when showing SNR
+		case 2: // timezone
 			if (++tz_hour >= 13) tz_hour = -12;
 			break;
-		case 2: // DST on/off
+		case 3: // DST on/off
 			if (++dst_mode > DST_MODE_MAX) dst_mode = 0;
 			break;
-		case 3: // 12/24 hour
+		case 4: // 12/24 hour
 			ampm = !ampm;
 			break;
-		case 4: // tenths enabled
+		case 5: // tenths enabled
 			tenth_enable = !tenth_enable;
 			break;
-		case 5: // colons
+		case 6: // colons
 			if (++colon_state > COLON_STATE_MAX) colon_state = 0;
 			break;
-		case 6: // brightness
+		case 7: // brightness
 			if (++brightness >= BRIGHTNESS_LEVELS) brightness = 0;
 			break;
 	}
@@ -1204,6 +1255,7 @@ void __ATTR_NORETURN__ main(void) {
 			rx_str_len = 0; // clear the buffer
 			nmea_ready = 0;
 			handleGPS(temp_buf, temp_len, 0);
+			if (menu_pos == MENU_SNR) menu_render(); // refresh the SNR display
 			continue;
 		}
 
