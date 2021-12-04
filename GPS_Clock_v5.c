@@ -224,6 +224,7 @@ volatile unsigned long last_pps_tick;
 volatile unsigned char last_pps_tick_good;
 volatile unsigned long tenth_ticks;
 volatile unsigned char gps_locked;
+volatile unsigned char gps_mode;
 volatile unsigned char sat_snr[MAX_SAT];
 volatile unsigned char total_sat_count;
 volatile unsigned char total_sat_fix_count;
@@ -638,14 +639,17 @@ static inline void handleGPS(const unsigned char *rx_sentence, const unsigned in
 #endif
 				), 6)) {
 		ptr = skip_commas(ptr, 3);
+		if (ptr == NULL) return; // not enough commas
 		// count the number of satellites used for fix
 		unsigned char sat_fix_count = 0;
 		for(int i = 0; i < 12; i++) {
 			if (ptr[0] != ',') sat_fix_count++;
 			ptr = skip_commas(ptr, 1);
+			if (ptr == NULL) return; // not enough commas
 		}
 #ifdef PX1100T
 		ptr = skip_commas(ptr, 3);
+		if (ptr == NULL) return; // not enough commas
 		unsigned char system_id = (unsigned char)atoi(ptr);
 		if (system_id == 1) total_sat_fix_count = 0;
 		total_sat_fix_count += sat_fix_count;
@@ -666,8 +670,10 @@ static inline void handleGPS(const unsigned char *rx_sentence, const unsigned in
 			case 'B': system_id = 3; break; // Beidou
 		}
 		ptr = skip_commas(ptr, 2);
+		if (ptr == NULL) return; // not enough commas
 		unsigned char msg_num = (unsigned char)atoi(ptr);
 		ptr = skip_commas(ptr, 1);
+		if (ptr == NULL) return; // not enough commas
 		unsigned char sat_count = (unsigned char)atoi(ptr);
 		if (system_id == 0 && msg_num == 1) {
 			memset((void*)sat_snr, 0, sizeof(sat_snr)); // on the first message, clear it all out
@@ -677,6 +683,7 @@ static inline void handleGPS(const unsigned char *rx_sentence, const unsigned in
 			total_sat_count += sat_count;
 		for(int i = 0; i < 3; i++) {
 			ptr = skip_commas(ptr, 4);
+			if (ptr == NULL) return; // not enough commas
 			sat_snr[i + (msg_num - 1) * 4 + system_id * 12] = (unsigned char)atoi(ptr);
 		}
 	} else if (!strncmp_P(ptr, PSTR(
@@ -701,6 +708,9 @@ static inline void handleGPS(const unsigned char *rx_sentence, const unsigned in
 		unsigned char d = (ptr[0] - '0') * 10 + (ptr[1] - '0');
 		unsigned char mon = (ptr[2] - '0') * 10 + (ptr[3] - '0');
 		unsigned int y = (ptr[4] - '0') * 10 + (ptr[5] - '0');
+		ptr = skip_commas(ptr, 3);
+		if (ptr == NULL) return; // not enough commas
+		gps_mode = *ptr;
 
 		// We must turn the two digit year into the actual A.D. year number.
 		// As time goes forward, we can keep a record of how far time has gotten,
@@ -966,7 +976,37 @@ static void menu_render() {
 				disp_reg[3] = convert_digit(total_sat_fix_count % 10);
 				disp_reg[4] = convert_digit(max_snr / 10);
 				disp_reg[5] = convert_digit(max_snr % 10);
-				disp_reg[6] = 0; // blank
+				switch(gps_mode) {
+					case 'A':
+						disp_reg[6] = MASK_A | MASK_B | MASK_C | MASK_E | MASK_F | MASK_G; // A
+						break;
+					case 'D':
+						disp_reg[6] = MASK_B | MASK_C | MASK_D | MASK_E | MASK_G; // d
+						break;
+					case 'E':
+						disp_reg[6] = MASK_A | MASK_D | MASK_E | MASK_F | MASK_G; // E
+						break;
+					case 'F':
+						disp_reg[6] = MASK_A | MASK_E | MASK_F | MASK_G; // F
+						break;
+					case 'M':
+						disp_reg[6] = MASK_A | MASK_B | MASK_C | MASK_E | MASK_F; // A without a crossbar
+						break;
+					case 'N':
+						disp_reg[6] = MASK_C | MASK_E | MASK_G; // n
+						break;
+					case 'P':
+						disp_reg[6] = MASK_A | MASK_B | MASK_E | MASK_G; // P
+						break;
+					case 'R':
+						disp_reg[6] = MASK_E | MASK_G; // r
+						break;
+					case 'S':
+						disp_reg[6] = MASK_A | MASK_C | MASK_D | MASK_F | MASK_G; // S
+						break;
+					default:
+						disp_reg[6] = 0; // blank
+				}
 			}
 			break;
 		case MENU_ZONE:
@@ -1236,6 +1276,7 @@ void __ATTR_NORETURN__ main(void) {
 	if (colon_state > COLON_STATE_MAX) colon_state = 1; // default to just on.
 
 	gps_locked = 0;
+	gps_mode = 0; // none of the above
 	menu_pos = 0;
 	debounce_time = 0;
 	button_down = 0;
