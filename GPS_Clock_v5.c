@@ -32,6 +32,9 @@
 #include <avr/pgmspace.h>
 #include <util/atomic.h>
 
+// GPS module is the PX1100T GPS receiver. Default is the Venus838LPx-T
+#define PX1100T
+
 // If you have a 16 MHz crystal connected up to port R, define this.
 #define XTAL
 
@@ -49,9 +52,15 @@
 // 32 MHz
 #define F_CPU (32000000UL)
 
+#ifdef PX1100T
+// CLK2X = 0. For 115200 baud @ 32 MHz: 
+#define BSEL (131)
+#define BSCALE (-3)
+#else
 // CLK2X = 0. For 9600 baud @ 32 MHz: 
 #define BSEL (12)
 #define BSCALE (4)
+#endif
 
 // Port A is the anodes - so segments A through G + DP.
 // Port D is the cathodes - so the digits from 0-7
@@ -83,7 +92,7 @@
 #define DIGIT_100_MSEC (6)
 #define DIGIT_MISC (7)
 
-// Port C is the serial port, switches and PPS.
+// Port C is the serial port, switches, PPS and FIX LED.
 
 // The buttons
 #define PORT_SW PORTC.IN
@@ -188,7 +197,12 @@
 #define FAST_PPS_TICKS (F_TICK / 20)
 
 // How many satellite SNRs are we willing to track (from GPGSV)?
+#ifdef PX1100T
+// 12 satellites per system, GPS, GLONASS, Galileo & Beidou
+#define MAX_SAT (12 * 4)
+#else
 #define MAX_SAT (12)
+#endif
 
 // disp_reg is the "registers" for the display. It's what's actively being
 // displayed right now by the rastering system.
@@ -211,8 +225,8 @@ volatile unsigned char last_pps_tick_good;
 volatile unsigned long tenth_ticks;
 volatile unsigned char gps_locked;
 volatile unsigned char sat_snr[MAX_SAT];
-volatile unsigned char sat_count;
-volatile unsigned char sat_fix_count;
+volatile unsigned char total_sat_count;
+volatile unsigned char total_sat_fix_count;
 volatile unsigned char menu_pos;
 volatile unsigned char tenth_enable;
 volatile unsigned char disp_tenth;
@@ -616,26 +630,62 @@ static inline void handleGPS(const unsigned char *rx_sentence, const unsigned in
 	}
 	  
 	const char *ptr = (char *)rx_sentence;
-	if (!strncmp_P(ptr, PSTR("$GPGSA"), 6)) {
+	if (!strncmp_P(ptr, PSTR(
+#ifdef PX1100T
+				 "$GNGSA"
+#else
+				 "$GPGSA"
+#endif
+				), 6)) {
 		ptr = skip_commas(ptr, 3);
 		// count the number of satellites used for fix
-		sat_fix_count = 0;
+		unsigned char sat_fix_count = 0;
 		for(int i = 0; i < 12; i++) {
 			if (ptr[0] != ',') sat_fix_count++;
 			ptr = skip_commas(ptr, 1);
 		}
-	} else if (!strncmp_P(ptr, PSTR("$GPGSV"), 6)) {
+#ifdef PX1100T
+		ptr = skip_commas(ptr, 3);
+		unsigned char system_id = (unsigned char)atoi(ptr);
+		if (system_id == 1) total_sat_fix_count = 0;
+		total_sat_fix_count += sat_fix_count;
+#else
+		total_sat_fix_count = sat_fix_count;
+#endif
+	} else if (!strncmp_P(ptr, PSTR("$GPGSV"), 6)
+#ifdef PX1100T
+			|| !strncmp_P(ptr, PSTR("$GLGSV"), 6) // GLONASS
+			|| !strncmp_P(ptr, PSTR("$GAGSV"), 6) // Galileo
+			|| !strncmp_P(ptr, PSTR("$GBGSV"), 6) // Beidou
+#endif
+							) {
+		unsigned char system_id = 0; // default to GPS
+		switch(ptr[2]) {
+			case 'L': system_id = 1; break; // GLONASS
+			case 'A': system_id = 2; break; // Galileo
+			case 'B': system_id = 3; break; // Beidou
+		}
 		ptr = skip_commas(ptr, 2);
 		unsigned char msg_num = (unsigned char)atoi(ptr);
 		ptr = skip_commas(ptr, 1);
-		sat_count = (unsigned char)atoi(ptr);
-		if (sat_count > MAX_SAT) sat_count = MAX_SAT;
+		unsigned char sat_count = (unsigned char)atoi(ptr);
+		if (system_id == 0 && msg_num == 1) {
+			memset((void*)sat_snr, 0, sizeof(sat_snr)); // on the first message, clear it all out
+			total_sat_count = 0;
+		}
+		if (msg_num == 1) // it's the same satellite count for each msg
+			total_sat_count += sat_count;
 		for(int i = 0; i < 3; i++) {
 			ptr = skip_commas(ptr, 4);
-			if ((i + msg_num * 4) > MAX_SAT) break;
-			sat_snr[i + msg_num * 4] = (unsigned char)atoi(ptr);
+			sat_snr[i + (msg_num - 1) * 4 + system_id * 12] = (unsigned char)atoi(ptr);
 		}
-	} else if (!strncmp_P(ptr, PSTR("$GPRMC"), 6)) {
+	} else if (!strncmp_P(ptr, PSTR(
+#ifdef PX1100T
+					"$GNRMC"
+#else
+					"$GPRMC"
+#endif
+					), 6)) {
 		// $GPRMC,172313.000,A,xxxx.xxxx,N,xxxxx.xxxx,W,0.01,180.80,260516,,,D*74\x0d\x0a
 		ptr = skip_commas(ptr, 1);
 		if (ptr == NULL) return; // not enough commas
@@ -645,6 +695,7 @@ static inline void handleGPS(const unsigned char *rx_sentence, const unsigned in
 		ptr = skip_commas(ptr, 1);
 		if (ptr == NULL) return; // not enough commas
 		gps_locked = *ptr == 'A'; // A = AOK.
+		if (!gps_locked) return; // no point proceeding from here.
 		ptr = skip_commas(ptr, 7);
 		if (ptr == NULL) return; // not enough commas
 		unsigned char d = (ptr[0] - '0') * 10 + (ptr[1] - '0');
@@ -754,6 +805,7 @@ static void write_no_sig() {
 	last_pps_tick_good = 0;
 	tenth_ticks = 0;
 	fake_blink = 0;
+	PORTC.OUTSET = _BV(1); // turn FIX on
 	memcpy_P((void*)disp_reg, no_sig_data, sizeof(no_sig_data));
 }
 
@@ -777,6 +829,7 @@ static inline void reset_raster(void) {
 	}
 }
 
+// This is the PPS capture handler. That is, this happens when PPS rises.
 ISR(TCC5_CCA_vect) {
 	while(!((TCC4.INTFLAGS & TC4_CCAIF_bm)) && ((TCC5.INTFLAGS & TC5_CCAIF_bm))) ; // wait for both words
 	unsigned long this_tick = (((unsigned long)TCC5.CCA) << 16) | TCC4.CCA;
@@ -809,6 +862,9 @@ ISR(TCC5_CCA_vect) {
 	last_pps_tick_good = 1;
 	last_pps_tick = this_tick;
 
+	if (gps_locked)
+		PORTC.OUTTGL = _BV(1); // toggle FIX
+
 	if (menu_pos) return;
 	if (!gps_locked) {
 		write_no_sig();
@@ -828,6 +884,7 @@ ISR(TCC5_CCA_vect) {
 	// Copy the display buffer data into the display.
 	memcpy((void*)disp_reg, (const void *)disp_buf, sizeof(disp_reg));
 	reset_raster();
+
 #ifdef LATENCY
 	PORTC.OUTSET = _BV(7);
 #endif
@@ -898,20 +955,21 @@ static void menu_render() {
 				write_no_sig();
 			tenth_ticks = 0;
 			break;
-		case MENU_SNR: // SNR
+		case MENU_SNR:
 			{
 				unsigned char max_snr = 0;
-				for (int i = 0; i < sat_count; i++)
+				for (int i = 0; i < MAX_SAT; i++)
 					if (max_snr < sat_snr[i]) max_snr = sat_snr[i];
-				disp_reg[0] = MASK_C | MASK_E | MASK_G; // n
-				disp_reg[1] = convert_digit(sat_count);
-				disp_reg[3] = MASK_A | MASK_C | MASK_D | MASK_F | MASK_G; // S
+				disp_reg[0] = convert_digit(total_sat_count / 10);
+				disp_reg[1] = convert_digit(total_sat_count % 10);
+				disp_reg[2] = convert_digit(total_sat_fix_count / 10);
+				disp_reg[3] = convert_digit(total_sat_fix_count % 10);
 				disp_reg[4] = convert_digit(max_snr / 10);
 				disp_reg[5] = convert_digit(max_snr % 10);
-				disp_reg[6] = convert_digit(sat_fix_count % 10);
+				disp_reg[6] = 0; // blank
 			}
 			break;
-		case MENU_ZONE: // zone
+		case MENU_ZONE:
         		disp_reg[0] = MASK_D | MASK_E | MASK_F | MASK_G; // t
         		disp_reg[1] = MASK_C | MASK_E | MASK_F | MASK_G; // h
 			if (tz_hour < 0) {
@@ -920,7 +978,7 @@ static void menu_render() {
 			disp_reg[4] = convert_digit(abs(tz_hour) / 10);
 			disp_reg[5] = convert_digit(abs(tz_hour) % 10);
 			break;
-		case MENU_DST: // DST on/off
+		case MENU_DST:
         		disp_reg[0] = MASK_B | MASK_C | MASK_D | MASK_E | MASK_G; // d
         		disp_reg[1] = MASK_A | MASK_C | MASK_D | MASK_F | MASK_G; // S
 			switch(dst_mode) {
@@ -947,13 +1005,13 @@ static void menu_render() {
                                         break;
                         }
 			break;
-		case MENU_AMPM: // 12/24 hour
+		case MENU_AMPM:
         		disp_reg[1] = convert_digit(ampm?1:2);
         		disp_reg[2] = convert_digit(ampm?2:4);
         		disp_reg[4] = MASK_C | MASK_E | MASK_F | MASK_G; // h
         		disp_reg[5] = MASK_E | MASK_G; // r
 			break;
-		case MENU_10TH: // tenths enabled
+		case MENU_10TH:
 			disp_reg[0] = convert_digit(1);
 			disp_reg[1] = convert_digit(0);
 			if (tenth_enable) {
@@ -965,7 +1023,7 @@ static void menu_render() {
 				disp_reg[5] = MASK_A | MASK_E | MASK_F | MASK_G; // F
 			}
 			break;
-		case MENU_COLON: // colons enabled
+		case MENU_COLON:
         		disp_reg[0] = MASK_A | MASK_D | MASK_E | MASK_F; // C
         		disp_reg[1] = MASK_C | MASK_D | MASK_E | MASK_G; // o
         		disp_reg[2] = MASK_D | MASK_E | MASK_F; // L
@@ -988,7 +1046,7 @@ static void menu_render() {
 					break;
 			}
 			break;
-		case MENU_BRIGHT: // brightness
+		case MENU_BRIGHT:
         		disp_reg[0] = MASK_C | MASK_D | MASK_E | MASK_F | MASK_G; // b
         		disp_reg[1] = MASK_E | MASK_G; // r
         		disp_reg[2] = MASK_B | MASK_C; // I
@@ -1033,24 +1091,24 @@ static void menu_set() {
 
 static void menu_select() {
 	switch(menu_pos) {
-		case 0: return; // ignore SELECT when just running
-		case 1: return; // ignore SELECT when showing SNR
-		case 2: // timezone
+		case MENU_OFF: return; // ignore SELECT when just running
+		case MENU_SNR: return; // ignore SELECT when showing SNR
+		case MENU_ZONE:
 			if (++tz_hour >= 13) tz_hour = -12;
 			break;
-		case 3: // DST on/off
+		case MENU_DST:
 			if (++dst_mode > DST_MODE_MAX) dst_mode = 0;
 			break;
-		case 4: // 12/24 hour
+		case MENU_AMPM:
 			ampm = !ampm;
 			break;
-		case 5: // tenths enabled
+		case MENU_10TH:
 			tenth_enable = !tenth_enable;
 			break;
-		case 6: // colons
+		case MENU_COLON:
 			if (++colon_state > COLON_STATE_MAX) colon_state = 0;
 			break;
-		case 7: // brightness
+		case MENU_BRIGHT: // brightness
 			if (++brightness >= BRIGHTNESS_LEVELS) brightness = 0;
 			break;
 	}
@@ -1072,15 +1130,14 @@ void __ATTR_NORETURN__ main(void) {
 	while(!(OSC.STATUS & OSC_PLLRDY_bm)) ; // wait for it.
 
 	_PROTECTED_WRITE(CLK.CTRL, CLK_SCLKSEL_PLL_gc); // switch to it
-	OSC.CTRL &= ~(OSC_RC2MEN_bm); // we're done with the 2 MHz osc.
 #else
 	// Run the CPU at 32 MHz using the RC osc. We'll DFLL against GPS later.
 	OSC.CTRL |= OSC_RC32MEN_bm;
 	while(!(OSC.STATUS & OSC_RC32MRDY_bm)) ; // wait for it.
 
 	_PROTECTED_WRITE(CLK.CTRL, CLK_SCLKSEL_RC32M_gc); // switch to it
-	OSC.CTRL &= ~(OSC_RC2MEN_bm); // we're done with the 2 MHz osc.
 #endif
+	OSC.CTRL &= ~(OSC_RC2MEN_bm); // we're done with the 2 MHz osc.
 
 	//wdt_enable(WDTO_1S); // This is broken on XMegas.
 	// This replacement code doesn't disable interrupts (but they're not on now anyway)
@@ -1110,8 +1167,8 @@ void __ATTR_NORETURN__ main(void) {
 	PORTA.DIRSET = 0xff;
 	PORTD.DIRSET = 0xff;
 
-	PORTC.OUTSET = _BV(3); // TXD defaults to high, but we really don't use it anyway
-	PORTC.DIRSET = _BV(3); // TXD is an output.
+	PORTC.OUTSET = _BV(3) | _BV(1); // TXD defaults to high, but we really don't use it anyway. FIX LED starts on
+	PORTC.DIRSET = _BV(3) | _BV(1); // TXD and FIX are outputs.
 #ifdef LATENCY
 	PORTC.OUTCLR = _BV(7);
 	PORTC.DIRSET = _BV(7);
