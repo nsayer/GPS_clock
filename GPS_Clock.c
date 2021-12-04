@@ -156,6 +156,23 @@
 #define RX_BUF_LEN (96)
 #define TX_BUF_LEN (24)
 
+// Note that some versions of the AVR LIBC forgot to
+// define the individual PUExn bit numbers.
+#ifndef PUEA0
+#define PUEA0 0
+#define PUEA1 1
+#define PUEA2 2
+#define PUEA3 3
+#define PUEA4 4
+#define PUEA5 5
+#define PUEA6 6
+#define PUEA7 7
+#define PUEB0 0
+#define PUEB1 1
+#define PUEB2 2
+#define PUEB3 3
+#endif
+
 #ifdef V31
 #define PORT_SW PINA
 #define SW_0_BIT _BV(PINA0)
@@ -163,23 +180,20 @@
 // DDR_BITS_A doesn't need to be adjusted. The correct bits are already inputs.
 // Port B only has the PPS input, so it's zero.
 #define DDR_BITS_B (0)
-// Note that some versions of the AVR LIBC forgot to
-// define the individual PUExn bit numbers. If you have
-// a version like this, then just use _BV(0) | _BV(2).
 #define PULLUP_BITS_A _BV(PUEA0) | _BV(PUEA3)
-#else
+#else // !V31
 // Port B is the switches and the PPS GPS input
 #define PORT_SW PINB
 #define DDR_BITS_B (0)
 #define SW_0_BIT _BV(PINB0)
 #ifdef V3
 #define SW_1_BIT _BV(PINB1)
-#else
+#else // !V3
 #define SW_1_BIT _BV(PINB2)
 #endif
 #ifdef V3
 #define PULLUP_BITS_B _BV(PUEB0) | _BV(PUEB1)
-#else
+#else // !V3
 #define PULLUP_BITS_B _BV(PUEB0) | _BV(PUEB2)
 #endif
 #endif
