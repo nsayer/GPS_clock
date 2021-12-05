@@ -695,12 +695,12 @@ static inline void handleGPS(const unsigned char *rx_sentence, const unsigned in
 		}
 	} else if (!strncmp_P(ptr, PSTR(
 #ifdef PX1100T
-					"$GNRMC"
+					"$GNZDA"
 #else
-					"$GPRMC"
+					"$GPZDA"
 #endif
 					), 6)) {
-		// $GPRMC,172313.000,A,xxxx.xxxx,N,xxxxx.xxxx,W,0.01,180.80,260516,,,D*74\x0d\x0a
+		// $GPZDA,124502.000,31,12,2020,00,00*44\x0d\x0a
 		ptr = skip_commas(ptr, 1);
 		if (ptr == NULL) return; // not enough commas
 		char h = (ptr[0] - '0') * 10 + (ptr[1] - '0');
@@ -708,25 +708,13 @@ static inline void handleGPS(const unsigned char *rx_sentence, const unsigned in
 		unsigned char s = (ptr[4] - '0') * 10 + (ptr[5] - '0');
 		ptr = skip_commas(ptr, 1);
 		if (ptr == NULL) return; // not enough commas
-		gps_locked = *ptr == 'A'; // A = AOK.
-		if (!gps_locked) return; // no point proceeding from here.
-		ptr = skip_commas(ptr, 7);
+		unsigned char d = (unsigned char)atoi(ptr);
+		ptr = skip_commas(ptr, 1);
 		if (ptr == NULL) return; // not enough commas
-		unsigned char d = (ptr[0] - '0') * 10 + (ptr[1] - '0');
-		unsigned char mon = (ptr[2] - '0') * 10 + (ptr[3] - '0');
-		unsigned int y = (ptr[4] - '0') * 10 + (ptr[5] - '0');
-		ptr = skip_commas(ptr, 3);
+		unsigned char mon = (unsigned char)atoi(ptr);
+		ptr = skip_commas(ptr, 1);
 		if (ptr == NULL) return; // not enough commas
-		gps_mode = *ptr;
-
-		// We must turn the two digit year into the actual A.D. year number.
-		// As time goes forward, we can keep a record of how far time has gotten,
-		// and assume that time will always go forwards. If we see a date ostensibly
-		// in the past, then it "must" mean that we've actually wrapped and need to
-		// add 100 years. We keep this "reference" date in sync with the GPS receiver,
-		// as it uses the reference date to control the GPS week rollover window.
-		y += 2000;
-		while (y < utc_ref_year) y += 100; // If it's in the "past," assume time wrapped on us.
+		unsigned int y = atoi(ptr);
 
 		if (utc_ref_year != 0 && y != utc_ref_year) {
 			// Once a year, we should update the refence date in the receiver. If we're running on New Years,
@@ -747,6 +735,20 @@ static inline void handleGPS(const unsigned char *rx_sentence, const unsigned in
 		if (h + tz_hour > 23) d++;
 		unsigned char dst_flags = calculateDST(d, mon, y);
 		handle_time(h, min, s, dst_flags);
+	} else if (!strncmp_P(ptr, PSTR(
+#ifdef PX1100T
+					"$GNRMC"
+#else
+					"$GPRMC"
+#endif
+					), 6)) {
+		// $GPRMC,172313.000,A,xxxx.xxxx,N,xxxxx.xxxx,W,0.01,180.80,260516,,,D*74\x0d\x0a
+		ptr = skip_commas(ptr, 2);
+		if (ptr == NULL) return; // not enough commas
+		gps_locked = *ptr == 'A'; // A = AOK.
+		ptr = skip_commas(ptr, 10);
+		if (ptr == NULL) return; // not enough commas
+		gps_mode = *ptr;
 	}
 }
 
