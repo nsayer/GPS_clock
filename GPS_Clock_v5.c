@@ -196,12 +196,18 @@
 // 50 ms worth of system clock.
 #define FAST_PPS_TICKS (F_TICK / 20)
 
+// There can be up to 5 $GxGSV messages per constellation
+#define MAX_GSV_MSGS (5)
+// There are 4 satellites in each $GxGSV message
+#define SATS_PER_GSV (4)
+
 // How many satellite SNRs are we willing to track (from GPGSV)?
 #ifdef PX1100T
 // 12 satellites per system, GPS, GLONASS, Galileo & Beidou
-#define MAX_SAT (12 * 4)
+#define MAX_SAT (SATS_PER_GSV * MAX_GSV_MSGS * 4)
 #else
-#define MAX_SAT (12)
+// 12 GPS satellites
+#define MAX_SAT (SATS_PER_GSV * MAX_GSV_MSGS)
 #endif
 
 // disp_reg is the "registers" for the display. It's what's actively being
@@ -672,6 +678,7 @@ static inline void handleGPS(const unsigned char *rx_sentence, const unsigned in
 		ptr = skip_commas(ptr, 2);
 		if (ptr == NULL) return; // not enough commas
 		unsigned char msg_num = (unsigned char)atoi(ptr);
+		if (msg_num > MAX_GSV_MSGS) return; // too many
 		ptr = skip_commas(ptr, 1);
 		if (ptr == NULL) return; // not enough commas
 		unsigned char sat_count = (unsigned char)atoi(ptr);
@@ -681,10 +688,10 @@ static inline void handleGPS(const unsigned char *rx_sentence, const unsigned in
 		}
 		if (msg_num == 1) // it's the same satellite count for each msg
 			total_sat_count += sat_count;
-		for(int i = 0; i < 3; i++) {
+		for(int i = 0; i < SATS_PER_GSV; i++) {
 			ptr = skip_commas(ptr, 4);
 			if (ptr == NULL) return; // not enough commas
-			sat_snr[i + (msg_num - 1) * 4 + system_id * 12] = (unsigned char)atoi(ptr);
+			sat_snr[i + (msg_num - 1) * SATS_PER_GSV + system_id * (SATS_PER_GSV * MAX_GSV_MSGS)] = (unsigned char)atoi(ptr);
 		}
 	} else if (!strncmp_P(ptr, PSTR(
 #ifdef PX1100T
