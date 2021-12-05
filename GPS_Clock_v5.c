@@ -203,10 +203,10 @@
 
 // How many satellite SNRs are we willing to track (from GPGSV)?
 #ifdef PX1100T
-// 12 satellites per system, GPS, GLONASS, Galileo & Beidou
+// 20 satellites per system, GPS, GLONASS, Galileo & Beidou
 #define MAX_SAT (SATS_PER_GSV * MAX_GSV_MSGS * 4)
 #else
-// 12 GPS satellites
+// 20 GPS satellites
 #define MAX_SAT (SATS_PER_GSV * MAX_GSV_MSGS)
 #endif
 
@@ -637,13 +637,14 @@ static inline void handleGPS(const unsigned char *rx_sentence, const unsigned in
 	}
 	  
 	const char *ptr = (char *)rx_sentence;
-	if (!strncmp_P(ptr, PSTR(
+	if (!strncmp_P(ptr, PSTR("$GPGSA"), 6)
 #ifdef PX1100T
-				 "$GNGSA"
-#else
-				 "$GPGSA"
+			|| !strncmp_P(ptr, PSTR("$GLGSA"), 6) // GLONASS
+			|| !strncmp_P(ptr, PSTR("$GAGSA"), 6) // Galileo
+			|| !strncmp_P(ptr, PSTR("$GBGSA"), 6) // Beidou
+			|| !strncmp_P(ptr, PSTR("$GNGSA"), 6) // ?? This has to be a bug.
 #endif
-				), 6)) {
+					) {
 		ptr = skip_commas(ptr, 3);
 		if (ptr == NULL) return; // not enough commas
 		// count the number of satellites used for fix
@@ -688,10 +689,14 @@ static inline void handleGPS(const unsigned char *rx_sentence, const unsigned in
 		}
 		if (msg_num == 1) // it's the same satellite count for each msg
 			total_sat_count += sat_count;
+		// At this point we really are pointing to the right field... for the "-1" satellite.
+		// So it's appropriate to first skip forward the number of fields (4) in each entry to land
+		// on the last one, which is the SNR.
 		for(int i = 0; i < SATS_PER_GSV; i++) {
 			ptr = skip_commas(ptr, 4);
 			if (ptr == NULL) return; // not enough commas
-			sat_snr[i + (msg_num - 1) * SATS_PER_GSV + system_id * (SATS_PER_GSV * MAX_GSV_MSGS)] = (unsigned char)atoi(ptr);
+			if (*ptr == ',') continue; // no entry, keep looking
+			sat_snr[i + ((msg_num - 1) * SATS_PER_GSV) + (system_id * (SATS_PER_GSV * MAX_GSV_MSGS))] = (unsigned char)atoi(ptr);
 		}
 	} else if (!strncmp_P(ptr, PSTR(
 #ifdef PX1100T
@@ -1285,6 +1290,8 @@ void __ATTR_NORETURN__ main(void) {
 	if (colon_state > COLON_STATE_MAX) colon_state = 1; // default to just on.
 
 	gps_locked = 0;
+	total_sat_count = 0;
+	total_sat_fix_count = 0;
 	gps_mode = 0; // none of the above
 	menu_pos = 0;
 	debounce_time = 0;
@@ -1358,7 +1365,7 @@ void __ATTR_NORETURN__ main(void) {
 			// the serial ISR keep working.
 			unsigned char temp_buf[RX_BUF_LEN];
 			unsigned int temp_len = rx_str_len;
-			memcpy(temp_buf, (const char *)rx_buf, temp_len);
+			memcpy(temp_buf, (const char *)rx_buf, temp_len + 1); // include null terminator
 			rx_str_len = 0; // clear the buffer
 			nmea_ready = 0;
 			handleGPS(temp_buf, temp_len, 0);
