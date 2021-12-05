@@ -1,18 +1,18 @@
 
-# Add _v4 or _v5 for versions >= 4.
-OUT=GPS_Clock
 
 # For v3 or previous clocks
-CHIP = attiny841
-PROGRAMMER = usbtiny
-# For v4 or v5 clocks
-#CHIP = atxmega32e5
-#PROGRAMMER = atmelice_pdi
+#OUT=GPS_Clock
+#CHIP = attiny841
+#PROGRAMMER = usbtiny -B 5
+# For v5 clocks
+OUT=GPS_Clock_v5
+CHIP = atxmega32e5
+PROGRAMMER = atmelice_pdi
 
 CC = avr-gcc
 OBJCPY = avr-objcopy
 AVRDUDE = avrdude
-OPTS = -Os -g -std=c11 -Wall -Wno-main
+OPTS = -Os -g -std=c11 -Wall -Wno-main -fno-tree-switch-conversion
 
 CFLAGS = -mmcu=$(CHIP) $(OPTS)
 
@@ -25,7 +25,7 @@ CFLAGS = -mmcu=$(CHIP) $(OPTS)
 %.elf: %.o
 	$(CC) $(CFLAGS) -o $@ $^
 
-all:	$(OUT).hex $(OUT).hex
+all:	$(OUT).hex
 
 clean:
 	rm -f *.hex *.elf *.o
