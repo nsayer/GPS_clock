@@ -77,8 +77,8 @@
 #define MASK_DP _BV(7)
 
 // Digit 7 has the two colons and the AM & PM lights
-#define MASK_COLON_HM (MASK_E | MASK_F)
-#define MASK_COLON_MS (MASK_B | MASK_C)
+#define MASK_COLON_HM (MASK_B | MASK_C)
+#define MASK_COLON_MS (MASK_E | MASK_F)
 #define MASK_AM (MASK_A)
 #define MASK_PM (MASK_D)
 
